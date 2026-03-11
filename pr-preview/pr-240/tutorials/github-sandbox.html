@@ -566,9 +566,13 @@ until the policy is updated.</p>
 </section>
 <section id="update-the-policy-from-your-machine">
 <h2>Update the Policy from Your Machine<a class="headerlink" href="#update-the-policy-from-your-machine" title="Link to this heading">#</a></h2>
-<p>In terminal 2, create a policy file that extends the default policy with GitHub write access for your repository. You can ask a coding agent running on your machine, such as Claude Code or Cursor, to generate it from the deny reasons.
+<p>In terminal 2, create a policy file that extends the <a class="reference internal" href="../reference/default-policy.html"><span class="doc">default policy</span></a> with GitHub write access for your repository. You can ask a coding agent on your machine, such as Claude Code or Cursor, to generate it from the deny reasons.
 The updated policy should have <code class="docutils literal notranslate"><span class="pre">github_git</span></code> and <code class="docutils literal notranslate"><span class="pre">github_api</span></code> blocks that grant write access to your repository.</p>
-<p>The following is a complete policy example that you can use as a starting point. Expand the dropdown to see the policy. Save it to a file, such as <code class="docutils literal notranslate"><span class="pre">/tmp/sandbox-policy-update.yaml</span></code>.</p>
+<p>The following steps outline the expected process done by the agent:</p>
+<ol class="arabic">
+<li><p>Reads the default policy.</p></li>
+<li><p>Adds <code class="docutils literal notranslate"><span class="pre">github_git</span></code> and <code class="docutils literal notranslate"><span class="pre">github_api</span></code> blocks that grant write access to your repository.
+Refer to the following policy example to compare with the policy the agent generated.</p>
 <details class="sd-sphinx-override sd-dropdown sd-card sd-mb-3">
 <summary class="sd-summary-title sd-card-header">
 <span class="sd-summary-icon"><svg version="1.1" width="1.0em" height="1.0em" class="sd-octicon sd-octicon-code" viewBox="0 0 16 16" aria-hidden="true"><path d="m11.28 3.22 4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734L13.94 8l-3.72-3.72a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215Zm-6.56 0a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L2.06 8l3.72 3.72a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L.47 8.53a.75.75 0 0 1 0-1.06Z"></path></svg></span><span class="sd-summary-text">Full reference policy</span><span class="sd-summary-state-marker sd-summary-chevron-right"><svg version="1.1" width="1.5em" height="1.5em" class="sd-octicon sd-octicon-chevron-right" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.72 18.78a.75.75 0 0 1 0-1.06L14.44 12 8.72 6.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018l6.25 6.25a.75.75 0 0 1 0 1.06l-6.25 6.25a.75.75 0 0 1-1.06 0Z"></path></svg></span></summary><div class="sd-summary-content sd-card-body docutils">
@@ -736,15 +740,18 @@ The updated policy should have <code class="docutils literal notranslate"><span 
 <p class="sd-card-text">The remaining blocks (<code class="docutils literal notranslate"><span class="pre">claude_code</span></code>, <code class="docutils literal notranslate"><span class="pre">nvidia_inference</span></code>, <code class="docutils literal notranslate"><span class="pre">pypi</span></code>, <code class="docutils literal notranslate"><span class="pre">vscode</span></code>) are identical to the <a class="reference internal" href="../reference/default-policy.html"><span class="doc">default policy</span></a>. The default policy’s <code class="docutils literal notranslate"><span class="pre">github_ssh_over_https</span></code> and <code class="docutils literal notranslate"><span class="pre">github_rest_api</span></code> blocks are replaced by the <code class="docutils literal notranslate"><span class="pre">github_git</span></code> and <code class="docutils literal notranslate"><span class="pre">github_api</span></code> blocks above, which grant write access to the specified repository. Sandbox behavior outside of GitHub operations is unchanged.</p>
 <p class="sd-card-text">For details on policy block structure, refer to <a class="reference internal" href="../sandboxes/index.html#network-access-rules"><span class="std std-ref">Network Access Rules</span></a>.</p>
 </div>
-</details><p>Apply the policy to the running sandbox:</p>
+</details></li>
+<li><p>Saves the policy to a file, such as <code class="docutils literal notranslate"><span class="pre">/tmp/sandbox-policy-update.yaml</span></code>.</p></li>
+<li><p>Applies the policy to the running sandbox by running the following command:</p>
 <div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>policy<span class="w"> </span><span class="nb">set</span><span class="w"> </span>&lt;sandbox-name&gt;<span class="w"> </span>--policy<span class="w"> </span>/tmp/sandbox-policy-update.yaml<span class="w"> </span>--wait
 </pre></div>
 </div>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>To find the name of your sandbox, check the output from <code class="docutils literal notranslate"><span class="pre">openshell</span> <span class="pre">sandbox</span> <span class="pre">create</span></code> or run <code class="docutils literal notranslate"><span class="pre">openshell</span> <span class="pre">sandbox</span> <span class="pre">list</span></code>.</p>
-</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
 <p>Network policies are hot-reloadable. The <code class="docutils literal notranslate"><span class="pre">--wait</span></code> flag blocks until the policy engine confirms the new revision loaded, and the update takes effect immediately without restarting the sandbox or reconnecting Claude Code.</p>
+</div>
+</li>
+</ol>
 </section>
 <section id="retry-the-push">
 <h2>Retry the Push<a class="headerlink" href="#retry-the-push" title="Link to this heading">#</a></h2>
