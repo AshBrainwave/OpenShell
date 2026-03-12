@@ -387,7 +387,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../get-started/quickstart.html">Quickstart</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../tutorials/github-sandbox.html">Tutorial: GitHub Policy Iteration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tutorials/github-sandbox.html">GitHub Policy Tutorial</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Sandboxes</span></p>
 <ul class="nav bd-sidenav">
@@ -660,14 +660,14 @@
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--upload</span></code></p></td>
 <td><p>Upload local files into the sandbox before running.</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--keep</span></code></p></td>
-<td><p>Keep the sandbox alive after the initial command or shell exits.</p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--no-keep</span></code></p></td>
+<td><p>Delete the sandbox after the initial command or shell exits.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--editor</span></code></p></td>
-<td><p>Launch <code class="docutils literal notranslate"><span class="pre">vscode</span></code> or <code class="docutils literal notranslate"><span class="pre">cursor</span></code> into <code class="docutils literal notranslate"><span class="pre">/sandbox</span></code>; installs OpenShell-managed SSH config and implies <code class="docutils literal notranslate"><span class="pre">--keep</span></code>.</p></td>
+<td><p>Launch <code class="docutils literal notranslate"><span class="pre">vscode</span></code> or <code class="docutils literal notranslate"><span class="pre">cursor</span></code> into <code class="docutils literal notranslate"><span class="pre">/sandbox</span></code>; installs OpenShell-managed SSH config and keeps the sandbox alive.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--forward</span></code></p></td>
-<td><p>Forward a local port into the sandbox at startup. Implies <code class="docutils literal notranslate"><span class="pre">--keep</span></code>.</p></td>
+<td><p>Forward a local port into the sandbox at startup. Keeps the sandbox alive.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--from</span></code></p></td>
 <td><p>Build from a community sandbox name, local Dockerfile directory, or container image reference.</p></td>

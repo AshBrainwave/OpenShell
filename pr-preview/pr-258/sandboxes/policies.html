@@ -822,7 +822,7 @@ window.addEventListener("load", load);</script>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../get-started/quickstart.html">Quickstart</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../tutorials/github-sandbox.html">Tutorial: GitHub Policy Iteration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tutorials/github-sandbox.html">GitHub Policy Tutorial</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Sandboxes</span></p>
 <ul class="current nav bd-sidenav">
@@ -908,13 +908,13 @@ window.addEventListener("load", load);</script>
 <section id="quick-start-apply-a-custom-policy">
 <h2>Quick Start: Apply a Custom Policy<a class="headerlink" href="#quick-start-apply-a-custom-policy" title="Link to this heading">#</a></h2>
 <p>Pass a policy YAML file when creating the sandbox:</p>
-<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>sandbox<span class="w"> </span>create<span class="w"> </span>--policy<span class="w"> </span>./my-policy.yaml<span class="w"> </span>--keep<span class="w"> </span>--<span class="w"> </span>claude
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>sandbox<span class="w"> </span>create<span class="w"> </span>--policy<span class="w"> </span>./my-policy.yaml<span class="w"> </span>--<span class="w"> </span>claude
 </pre></div>
 </div>
-<p>The <code class="docutils literal notranslate"><span class="pre">--keep</span></code> flag keeps the sandbox running after the initial command exits, which is useful when you plan to iterate on the policy.</p>
+<p><code class="docutils literal notranslate"><span class="pre">openshell</span> <span class="pre">sandbox</span> <span class="pre">create</span></code> keeps the sandbox running after the initial command exits, which is useful when you plan to iterate on the policy. Add <code class="docutils literal notranslate"><span class="pre">--no-keep</span></code> if you want the sandbox deleted automatically instead.</p>
 <p>To avoid passing <code class="docutils literal notranslate"><span class="pre">--policy</span></code> every time, set a default policy with an environment variable:</p>
 <div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">OPENSHELL_SANDBOX_POLICY</span><span class="o">=</span>./my-policy.yaml
-<span class="gp">$ </span>openshell<span class="w"> </span>sandbox<span class="w"> </span>create<span class="w"> </span>--keep<span class="w"> </span>--<span class="w"> </span>claude
+<span class="gp">$ </span>openshell<span class="w"> </span>sandbox<span class="w"> </span>create<span class="w"> </span>--<span class="w"> </span>claude
 </pre></div>
 </div>
 <p>The CLI uses the policy from <code class="docutils literal notranslate"><span class="pre">OPENSHELL_SANDBOX_POLICY</span></code> whenever <code class="docutils literal notranslate"><span class="pre">--policy</span></code> is not explicitly provided.</p>

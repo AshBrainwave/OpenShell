@@ -387,7 +387,7 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../get-started/quickstart.html">Quickstart</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../tutorials/github-sandbox.html">Tutorial: GitHub Policy Iteration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../tutorials/github-sandbox.html">GitHub Policy Tutorial</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Sandboxes</span></p>
 <ul class="current nav bd-sidenav">
@@ -489,15 +489,14 @@ the cause. Start Docker and try again.</p>
 <span class="w">    </span>--provider<span class="w"> </span>my-claude<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--policy<span class="w"> </span>policy.yaml<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--upload<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--keep<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--<span class="w"> </span>claude
 </pre></div>
 </div>
 <div class="admonition tip">
 <p class="admonition-title">Tip</p>
-<p>Use <code class="docutils literal notranslate"><span class="pre">--keep</span></code> to keep the sandbox running after the initial command or shell exits.
-This is especially useful when you are iterating on a policy or want to
-reconnect later from another terminal or VS Code.</p>
+<p>Sandboxes created with <code class="docutils literal notranslate"><span class="pre">openshell</span> <span class="pre">sandbox</span> <span class="pre">create</span></code> stay running by default after
+the initial command or shell exits. Use <code class="docutils literal notranslate"><span class="pre">--no-keep</span></code> when you want the sandbox
+deleted automatically instead.</p>
 </div>
 </section>
 <section id="create-from-a-community-sandbox-or-custom-image">
