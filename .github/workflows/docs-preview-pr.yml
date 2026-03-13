@@ -38,21 +38,21 @@ jobs:
             - name: Install tools
               run: mise install
 
-            - name: Generate preview
-              id: preview
+            - name: Install Fern CLI
+              run: npm install -g fern-api
+
+            - name: Generate preview URL
+              id: generate-docs
               env:
                   FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
               run: |
-                  OUTPUT=$(mise run docs:preview 2>&1) || true
+                  OUTPUT=$(fern generate --docs --preview 2>&1) || true
                   echo "$OUTPUT"
-                  URL=$(echo "$OUTPUT" | grep -oE 'https://[^ ]+' | tail -1)
-                  echo "url=$URL" >> "$GITHUB_OUTPUT"
+                  URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K.*(?= \()')
+                  echo "Preview URL: $URL"
+                  echo "Preview your docs: $URL" > preview_url.txt
 
             - name: Comment preview URL on PR
-              if: steps.preview.outputs.url != ''
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                  gh pr comment "${{ github.event.pull_request.number }}" \
-                    --body "**Docs preview:** ${{ steps.preview.outputs.url }}" \
-                    --repo "${{ github.repository }}"
+              uses: thollander/actions-comment-pull-request@v2.4.3
+              with:
+                  filePath: preview_url.txt

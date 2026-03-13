@@ -33,7 +33,10 @@ jobs:
             - name: Install tools
               run: mise install
 
+            - name: Install Fern CLI
+              run: npm install -g fern-api
+
             - name: Publish documentation
               env:
                   FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
-              run: mise run docs:build
+              run: fern generate --docs
