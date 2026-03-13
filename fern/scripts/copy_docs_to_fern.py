@@ -24,7 +24,7 @@ def main() -> None:
     )
     parser.add_argument(
         "version",
-        help="Version folder name (e.g. v0.1.0)",
+        help="Version folder name (e.g. v0.0.1)",
     )
     parser.add_argument(
         "--docs-dir",

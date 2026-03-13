@@ -26,9 +26,9 @@ fern/
 ├── docs.yml              # Global config (title, colors, versions)
 ├── fern.config.json      # Fern CLI config
 ├── versions/
-│   └── v0.1.0.yml       # Navigation for v0.1.0
-├── v0.1.0/
-│   └── pages/            # MDX content for v0.1.0
+│   └── v0.0.1.yml       # Navigation for v0.0.1
+├── v0.0.1/
+│   └── pages/            # MDX content for v0.0.1
 ├── scripts/              # Migration and conversion scripts
 ├── components/           # Custom React components (footer)
 └── assets/               # Favicon, logos, images
@@ -40,31 +40,31 @@ To migrate or update docs from `docs/` to Fern:
 
 ```bash
 # 1. Copy docs to fern (run from repo root)
-python3 fern/scripts/copy_docs_to_fern.py v0.1.0
+python3 fern/scripts/copy_docs_to_fern.py v0.0.1
 
 # 2. Expand {include} directives (index)
-python3 fern/scripts/expand_includes.py fern/v0.1.0/pages
+python3 fern/scripts/expand_includes.py fern/v0.0.1/pages
 
 # 3. Convert OpenShell-specific syntax ({doc} roles, {ref} roles)
-python3 fern/scripts/convert_openshell_specific.py fern/v0.1.0/pages
+python3 fern/scripts/convert_openshell_specific.py fern/v0.0.1/pages
 
 # 4. Convert MyST to Fern MDX
-python3 fern/scripts/convert_myst_to_fern.py fern/v0.1.0/pages
+python3 fern/scripts/convert_myst_to_fern.py fern/v0.0.1/pages
 
 # 5. Add frontmatter
-python3 fern/scripts/add_frontmatter.py fern/v0.1.0/pages
+python3 fern/scripts/add_frontmatter.py fern/v0.0.1/pages
 
 # 6. Update internal links
-python3 fern/scripts/update_links.py fern/v0.1.0/pages
+python3 fern/scripts/update_links.py fern/v0.0.1/pages
 
 # 7. Remove duplicate H1s (when title matches frontmatter)
-python3 fern/scripts/remove_duplicate_h1.py fern/v0.1.0/pages
+python3 fern/scripts/remove_duplicate_h1.py fern/v0.0.1/pages
 
 # 8. Fix MyST frontmatter for Fern compatibility
-python3 fern/scripts/fix_frontmatter.py fern/v0.1.0/pages
+python3 fern/scripts/fix_frontmatter.py fern/v0.0.1/pages
 
 # 9. Validate
-./fern/scripts/check_unconverted.sh fern/v0.1.0/pages
+./fern/scripts/check_unconverted.sh fern/v0.0.1/pages
 ```
 
 ## MDX Components

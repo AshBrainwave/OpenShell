@@ -7,9 +7,9 @@ instances:
 title: NVIDIA OpenShell
 
 versions:
-  - display-name: v0.1.0
-    path: versions/v0.1.0.yml
-    slug: v0.1.0
+  - display-name: v0.0.1
+    path: versions/v0.0.1.yml
+    slug: v0.0.1
 
 footer: ./components/CustomFooter.tsx
 

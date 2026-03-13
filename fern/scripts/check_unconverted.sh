@@ -6,7 +6,7 @@
 
 set -e
 
-PAGES_DIR="${1:-fern/v0.1.0/pages}"
+PAGES_DIR="${1:-fern/v0.0.1/pages}"
 
 echo "=== Checking for unconverted MyST syntax in $PAGES_DIR ==="
 echo ""

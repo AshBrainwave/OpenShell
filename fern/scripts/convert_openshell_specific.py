@@ -107,7 +107,7 @@ def main() -> None:
     parser.add_argument(
         "pages_dir",
         type=Path,
-        help="Path to pages directory (e.g. fern/v0.1.0/pages)",
+        help="Path to pages directory (e.g. fern/v0.0.1/pages)",
     )
     args = parser.parse_args()
 
