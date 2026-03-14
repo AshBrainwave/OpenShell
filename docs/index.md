@@ -234,6 +234,6 @@ reference/support-matrix
 :caption: Resources
 :hidden:
 
-resources/license
 Playbooks <resources/playbooks/index>
+resources/license
 ```
