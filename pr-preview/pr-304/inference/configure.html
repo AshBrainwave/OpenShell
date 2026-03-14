@@ -420,7 +420,6 @@
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Resources</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../resources/license.html">License</a></li>
 <li class="toctree-l1 has-children"><a class="reference internal" href="../resources/playbooks/index.html">Playbooks</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l2 has-children"><a class="reference internal" href="../resources/playbooks/openclaw/index.html">OpenShell with OpenClaw</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l3"><a class="reference internal" href="../resources/playbooks/openclaw/windows.html">Windows</a></li>
@@ -432,6 +431,7 @@
 </details></li>
 </ul>
 </details></li>
+<li class="toctree-l1"><a class="reference internal" href="../resources/license.html">License</a></li>
 </ul>
 </div>
 </nav></div>
@@ -590,7 +590,8 @@ Anthropic</label><div class="sd-tab-content docutils">
 <p>Use this endpoint when inference should stay local to the host for privacy and security reasons. External providers that should be reached directly belong in <code class="docutils literal notranslate"><span class="pre">network_policies</span></code> instead.</p>
 <section id="verify-the-endpoint-from-a-sandbox">
 <h3>Verify the Endpoint from a Sandbox<a class="headerlink" href="#verify-the-endpoint-from-a-sandbox" title="Link to this heading">#</a></h3>
-<p><code class="docutils literal notranslate"><span class="pre">openshell</span> <span class="pre">inference</span> <span class="pre">get</span></code> confirms the configuration was saved, but does not verify the upstream endpoint is reachable. To confirm end-to-end connectivity, connect to a sandbox and run:</p>
+<p><code class="docutils literal notranslate"><span class="pre">openshell</span> <span class="pre">inference</span> <span class="pre">get</span></code> confirms the configuration was saved, but does not verify the upstream endpoint is reachable. The CLI also accepts <code class="docutils literal notranslate"><span class="pre">--no-verify</span></code> on <code class="docutils literal notranslate"><span class="pre">openshell</span> <span class="pre">inference</span> <span class="pre">set</span></code> and <code class="docutils literal notranslate"><span class="pre">openshell</span> <span class="pre">inference</span> <span class="pre">update</span></code> so automation can opt out explicitly ahead of a future verify-by-default rollout.</p>
+<p>To confirm end-to-end connectivity, connect to a sandbox and run:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>https://inference.local/v1/responses<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
