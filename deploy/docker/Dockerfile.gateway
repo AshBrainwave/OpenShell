@@ -11,6 +11,7 @@ FROM --platform=$BUILDPLATFORM rust:1.88-slim AS builder
 ARG TARGETARCH
 ARG BUILDARCH
 ARG OPENSHELL_CARGO_VERSION
+ARG OPENSHELL_CARGO_PROFILE=release
 ARG CARGO_TARGET_CACHE_SCOPE=default
 
 # Install build dependencies
@@ -55,7 +56,14 @@ COPY proto/ proto/
 RUN --mount=type=cache,id=cargo-registry-gateway-${TARGETARCH},sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-target-gateway-${TARGETARCH}-${CARGO_TARGET_CACHE_SCOPE},sharing=locked,target=/build/target \
     --mount=type=cache,id=sccache-gateway-${TARGETARCH},sharing=locked,target=/tmp/sccache \
-    . cross-build.sh && cargo_cross_build --release -p openshell-server 2>/dev/null || true
+    . cross-build.sh && \
+    if [ "${OPENSHELL_CARGO_PROFILE}" = "release" ]; then \
+      cargo_cross_build --release -p openshell-server 2>/dev/null || true; \
+    elif [ "${OPENSHELL_CARGO_PROFILE}" = "dev" ]; then \
+      cargo_cross_build -p openshell-server 2>/dev/null || true; \
+    else \
+      cargo_cross_build --profile "${OPENSHELL_CARGO_PROFILE}" -p openshell-server 2>/dev/null || true; \
+    fi
 
 # Copy actual source code
 COPY crates/ crates/
@@ -75,8 +83,16 @@ RUN --mount=type=cache,id=cargo-registry-gateway-${TARGETARCH},sharing=locked,ta
     if [ -n "${OPENSHELL_CARGO_VERSION:-}" ]; then \
       sed -i -E '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${OPENSHELL_CARGO_VERSION}"'"/}' Cargo.toml; \
     fi && \
-    cargo_cross_build --release -p openshell-server && \
-    cp "$(cross_output_dir release)/openshell-server" /build/openshell-server
+    if [ "${OPENSHELL_CARGO_PROFILE}" = "release" ]; then \
+      cargo_cross_build --release -p openshell-server && \
+      cp "$(cross_output_dir release)/openshell-server" /build/openshell-server; \
+    elif [ "${OPENSHELL_CARGO_PROFILE}" = "dev" ]; then \
+      cargo_cross_build -p openshell-server && \
+      cp "$(cross_output_dir debug)/openshell-server" /build/openshell-server; \
+    else \
+      cargo_cross_build --profile "${OPENSHELL_CARGO_PROFILE}" -p openshell-server && \
+      cp "$(cross_output_dir "${OPENSHELL_CARGO_PROFILE}")/openshell-server" /build/openshell-server; \
+    fi
 
 # Stage 2: Runtime (uses target platform)
 # NVIDIA hardened Ubuntu base for supply chain consistency.

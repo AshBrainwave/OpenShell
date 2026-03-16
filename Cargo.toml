@@ -131,3 +131,11 @@ strip = true
 [profile.dev]
 # Faster compile times for dev builds
 debug = 1
+
+[profile.local-fast]
+# Local-only profile for faster dockerized inner-loop builds.
+inherits = "dev"
+opt-level = 1
+debug = 0
+codegen-units = 256
+incremental = true

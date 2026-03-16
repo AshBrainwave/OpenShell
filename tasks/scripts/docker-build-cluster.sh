@@ -15,6 +15,39 @@
 #   IMAGE_REGISTRY           - Registry prefix for image name (e.g. ghcr.io/org/repo)
 set -euo pipefail
 
+sha256_16() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print substr($1, 1, 16)}'
+  else
+    shasum -a 256 "$1" | awk '{print substr($1, 1, 16)}'
+  fi
+}
+
+sha256_16_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print substr($1, 1, 16)}'
+  else
+    shasum -a 256 | awk '{print substr($1, 1, 16)}'
+  fi
+}
+
+detect_rust_scope() {
+  local dockerfile="$1"
+  local rust_from
+  rust_from=$(grep -E '^FROM --platform=\$BUILDPLATFORM rust:[^ ]+' "$dockerfile" | head -n1 | sed -E 's/^FROM --platform=\$BUILDPLATFORM rust:([^ ]+).*/\1/' || true)
+  if [[ -n "${rust_from}" ]]; then
+    echo "rust-${rust_from}"
+    return
+  fi
+
+  if grep -q "rustup.rs" "$dockerfile"; then
+    echo "rustup-stable"
+    return
+  fi
+
+  echo "no-rust"
+}
+
 IMAGE_TAG=${IMAGE_TAG:-dev}
 IMAGE_NAME="openshell/cluster"
 if [[ -n "${IMAGE_REGISTRY:-}" ]]; then
@@ -65,6 +98,16 @@ elif [[ "${DOCKER_PLATFORM:-}" == *","* ]]; then
   OUTPUT_FLAG="--push"
 fi
 
+CARGO_BUILD_PROFILE="${OPENSHELL_CARGO_PROFILE:-}"
+if [[ -z "${CARGO_BUILD_PROFILE}" ]]; then
+  if [[ -n "${CI:-}" ]]; then
+    CARGO_BUILD_PROFILE="release"
+  else
+    CARGO_BUILD_PROFILE="local-fast"
+  fi
+fi
+PROFILE_ARGS=(--build-arg "OPENSHELL_CARGO_PROFILE=${CARGO_BUILD_PROFILE}")
+
 # Compute cargo version from git tags (same scheme as docker-build-component.sh).
 VERSION_ARGS=()
 if [[ -n "${OPENSHELL_CARGO_VERSION:-}" ]]; then
@@ -76,11 +119,18 @@ else
   fi
 fi
 
+LOCK_HASH=$(sha256_16 Cargo.lock)
+RUST_SCOPE=${RUST_TOOLCHAIN_SCOPE:-$(detect_rust_scope "deploy/docker/Dockerfile.cluster")}
+CACHE_SCOPE_INPUT="v2|cluster|base|${LOCK_HASH}|${RUST_SCOPE}|${CARGO_BUILD_PROFILE}"
+CARGO_TARGET_CACHE_SCOPE=$(printf '%s' "${CACHE_SCOPE_INPUT}" | sha256_16_stdin)
+
 docker buildx build \
   ${BUILDER_ARGS[@]+"${BUILDER_ARGS[@]}"} \
   ${DOCKER_PLATFORM:+--platform ${DOCKER_PLATFORM}} \
   ${CACHE_ARGS[@]+"${CACHE_ARGS[@]}"} \
+  ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} \
   ${VERSION_ARGS[@]+"${VERSION_ARGS[@]}"} \
+  --build-arg "CARGO_TARGET_CACHE_SCOPE=${CARGO_TARGET_CACHE_SCOPE}" \
   -f deploy/docker/Dockerfile.cluster \
   -t ${IMAGE_NAME}:${IMAGE_TAG} \
   ${K3S_VERSION:+--build-arg K3S_VERSION=${K3S_VERSION}} \

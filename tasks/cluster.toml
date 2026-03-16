@@ -34,3 +34,19 @@ hide = true
 description = "Tag and push gateway image to pull registry"
 run = "tasks/scripts/cluster-push-component.sh gateway"
 hide = true
+
+["cluster:baseline"]
+description = "Capture cold/warm baseline timings for local builds"
+run = "tasks/scripts/cluster-baseline.sh --mode both"
+
+["cluster:baseline:full"]
+description = "Capture baseline timings including cluster deploy"
+run = "tasks/scripts/cluster-baseline.sh --mode both --with-deploy"
+
+["cluster:baseline:warm"]
+description = "Capture warm-path baseline timings for local builds"
+run = "tasks/scripts/cluster-baseline.sh --mode warm"
+
+["cluster:baseline:warm:full"]
+description = "Capture warm-path baseline timings including cluster deploy"
+run = "tasks/scripts/cluster-baseline.sh --mode warm --with-deploy"

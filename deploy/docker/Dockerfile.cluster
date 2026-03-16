@@ -77,6 +77,7 @@ FROM --platform=$BUILDPLATFORM rust:1.88-slim AS supervisor-builder
 ARG TARGETARCH
 ARG BUILDARCH
 ARG OPENSHELL_CARGO_VERSION
+ARG OPENSHELL_CARGO_PROFILE=release
 ARG CARGO_TARGET_CACHE_SCOPE=default
 ARG SCCACHE_MEMCACHED_ENDPOINT
 
@@ -121,7 +122,14 @@ COPY proto/ proto/
 RUN --mount=type=cache,id=cargo-registry-supervisor-${TARGETARCH},sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-target-supervisor-${TARGETARCH}-${CARGO_TARGET_CACHE_SCOPE},sharing=locked,target=/build/target \
     --mount=type=cache,id=sccache-supervisor-${TARGETARCH},sharing=locked,target=/tmp/sccache \
-    . cross-build.sh && cargo_cross_build -p openshell-sandbox 2>/dev/null || true
+    . cross-build.sh && \
+    if [ "${OPENSHELL_CARGO_PROFILE}" = "release" ]; then \
+      cargo_cross_build --release -p openshell-sandbox 2>/dev/null || true; \
+    elif [ "${OPENSHELL_CARGO_PROFILE}" = "dev" ]; then \
+      cargo_cross_build -p openshell-sandbox 2>/dev/null || true; \
+    else \
+      cargo_cross_build --profile "${OPENSHELL_CARGO_PROFILE}" -p openshell-sandbox 2>/dev/null || true; \
+    fi
 
 # Copy actual source code
 COPY crates/ crates/
@@ -139,9 +147,28 @@ RUN --mount=type=cache,id=cargo-registry-supervisor-${TARGETARCH},sharing=locked
     if [ -n "${OPENSHELL_CARGO_VERSION:-}" ]; then \
       sed -i -E '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${OPENSHELL_CARGO_VERSION}"'"/}' Cargo.toml; \
     fi && \
-    cargo_cross_build --release -p openshell-sandbox && \
-    mkdir -p /build/out && \
-    cp "$(cross_output_dir release)/openshell-sandbox" /build/out/
+    if [ "${OPENSHELL_CARGO_PROFILE}" = "release" ]; then \
+      cargo_cross_build --release -p openshell-sandbox && \
+      mkdir -p /build/out && \
+      cp "$(cross_output_dir release)/openshell-sandbox" /build/out/; \
+    elif [ "${OPENSHELL_CARGO_PROFILE}" = "dev" ]; then \
+      cargo_cross_build -p openshell-sandbox && \
+      mkdir -p /build/out && \
+      cp "$(cross_output_dir debug)/openshell-sandbox" /build/out/; \
+    else \
+      cargo_cross_build --profile "${OPENSHELL_CARGO_PROFILE}" -p openshell-sandbox && \
+      mkdir -p /build/out && \
+      cp "$(cross_output_dir "${OPENSHELL_CARGO_PROFILE}")/openshell-sandbox" /build/out/; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Stage 1e: Minimal export stage for local supervisor extraction
+# ---------------------------------------------------------------------------
+# Exporting directly from supervisor-builder with --output type=local copies the
+# full build filesystem (including target cache) and is very slow on macOS.
+# This scratch stage contains only the final binary.
+FROM scratch AS supervisor-export
+COPY --from=supervisor-builder /build/out/openshell-sandbox /openshell-sandbox
 
 # ---------------------------------------------------------------------------
 # Stage 2: Install NVIDIA container toolkit on Ubuntu

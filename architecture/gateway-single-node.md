@@ -143,7 +143,7 @@ flowchart LR
 
 The `deploy_gateway_with_logs` variant accepts an `FnMut(String)` callback for progress reporting. The CLI wraps this in a `GatewayDeployLogPanel` for interactive terminals.
 
-**Pre-deploy check** (CLI layer in `gateway_start`): In interactive terminals, `check_existing_deployment` inspects whether a container or volume already exists. If found, the user is prompted to destroy and recreate or reuse the existing gateway.
+**Pre-deploy check** (CLI layer in `gateway_start`): `check_existing_deployment` inspects whether a container or volume already exists. In interactive terminals, the user is prompted to destroy and recreate or reuse the existing gateway. In non-interactive mode, the command fails unless `--recreate` or `--reuse-ok` is provided explicitly.
 
 ### 2) Image readiness
 

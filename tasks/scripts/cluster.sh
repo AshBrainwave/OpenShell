@@ -16,6 +16,14 @@ normalize_name() {
 CLUSTER_NAME=${CLUSTER_NAME:-$(basename "$PWD")}
 CLUSTER_NAME=$(normalize_name "${CLUSTER_NAME}")
 CONTAINER_NAME="openshell-cluster-${CLUSTER_NAME}"
+DEPLOY_TX_ID=${DEPLOY_TX_ID:-"tx-$(date +%Y%m%d-%H%M%S)-$RANDOM"}
+DEPLOY_REPORT_DIR=${DEPLOY_REPORT_DIR:-.cache/deploy-reports}
+
+mkdir -p "${DEPLOY_REPORT_DIR}"
+export DEPLOY_TX_ID
+export DEPLOY_REPORT_DIR
+
+echo "Deploy transaction: ${DEPLOY_TX_ID}"
 
 if ! docker ps -q --filter "name=${CONTAINER_NAME}" | grep -q .; then
   echo "No running cluster found. Bootstrapping..."

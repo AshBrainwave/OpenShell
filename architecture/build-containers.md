@@ -37,6 +37,10 @@ This pulls `ghcr.io/nvidia/openshell-community/sandboxes/<name>:latest`.
 
 `mise run cluster` is the primary development command. It bootstraps a cluster if one doesn't exist, then performs incremental deploys for subsequent runs.
 
+For local (non-CI) Docker builds, OpenShell defaults to the Cargo profile
+`local-fast` to reduce rebuild latency. CI keeps `release` builds by default.
+Set `OPENSHELL_CARGO_PROFILE=release` locally when you need release-equivalent binaries.
+
 The incremental deploy (`cluster-deploy-fast.sh`) fingerprints local Git changes and only rebuilds components whose files have changed:
 
 | Changed files | Rebuild triggered |
@@ -58,3 +62,16 @@ mise run cluster -- supervisor # rebuild supervisor only
 mise run cluster -- chart      # helm upgrade only
 mise run cluster -- all        # rebuild everything
 ```
+
+To baseline local compile and image build latency before optimization work:
+
+```bash
+mise run cluster:baseline       # cold + warm build timings
+mise run cluster:baseline:full  # same plus `mise run cluster` deploy timing
+mise run cluster:baseline:warm  # warm-only build timings
+mise run cluster:baseline:warm:full  # warm-only + deploy
+```
+
+Reports are written to `.cache/perf/` as both CSV and markdown.
+
+Each `mise run cluster` invocation also emits a deploy transaction report to `.cache/deploy-reports/<tx-id>.md`, including selected actions (gateway rebuild, supervisor update, helm upgrade), fingerprints, and per-step durations.

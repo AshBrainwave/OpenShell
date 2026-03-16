@@ -15,11 +15,21 @@ CLUSTER_NAME=$(normalize_name "${CLUSTER_NAME}")
 CONTAINER_NAME="openshell-cluster-${CLUSTER_NAME}"
 IMAGE_REPO_BASE=${IMAGE_REPO_BASE:-${OPENSHELL_REGISTRY:-127.0.0.1:5000/openshell}}
 IMAGE_TAG=${IMAGE_TAG:-dev}
-RUST_BUILD_PROFILE=${RUST_BUILD_PROFILE:-debug}
+CARGO_BUILD_PROFILE=${OPENSHELL_CARGO_PROFILE:-}
+if [[ -z "${CARGO_BUILD_PROFILE}" ]]; then
+  if [[ -n "${CI:-}" ]]; then
+    CARGO_BUILD_PROFILE="release"
+  else
+    CARGO_BUILD_PROFILE=${RUST_BUILD_PROFILE:-local-fast}
+  fi
+fi
 DEPLOY_FAST_MODE=${DEPLOY_FAST_MODE:-auto}
 FORCE_HELM_UPGRADE=${FORCE_HELM_UPGRADE:-0}
 DEPLOY_FAST_HELM_WAIT=${DEPLOY_FAST_HELM_WAIT:-0}
 DEPLOY_FAST_STATE_FILE=${DEPLOY_FAST_STATE_FILE:-.cache/cluster-deploy-fast.state}
+DEPLOY_TX_ID=${DEPLOY_TX_ID:-"tx-$(date +%Y%m%d-%H%M%S)-$RANDOM"}
+DEPLOY_REPORT_DIR=${DEPLOY_REPORT_DIR:-.cache/deploy-reports}
+DEPLOY_REPORT_FILE="${DEPLOY_REPORT_DIR}/${DEPLOY_TX_ID}.md"
 
 overall_start=$(date +%s)
 
@@ -29,6 +39,49 @@ log_duration() {
   local end=$3
   echo "${label} took $((end - start))s"
 }
+
+sha256_16() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print substr($1, 1, 16)}'
+  else
+    shasum -a 256 "$1" | awk '{print substr($1, 1, 16)}'
+  fi
+}
+
+sha256_16_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print substr($1, 1, 16)}'
+  else
+    shasum -a 256 | awk '{print substr($1, 1, 16)}'
+  fi
+}
+
+detect_rust_scope() {
+  local dockerfile=$1
+  local rust_from
+  rust_from=$(grep -E '^FROM --platform=\$BUILDPLATFORM rust:[^ ]+' "$dockerfile" | head -n1 | sed -E 's/^FROM --platform=\$BUILDPLATFORM rust:([^ ]+).*/\1/' || true)
+  if [[ -n "${rust_from}" ]]; then
+    echo "rust-${rust_from}"
+    return
+  fi
+
+  if grep -q "rustup.rs" "$dockerfile"; then
+    echo "rustup-stable"
+    return
+  fi
+
+  echo "no-rust"
+}
+
+change_detection_duration=0
+builds_duration=0
+supervisor_duration=0
+image_push_duration=0
+helm_upgrade_duration=0
+gateway_rollout_duration=0
+total_duration=0
+
+mkdir -p "${DEPLOY_REPORT_DIR}"
 
 if ! docker ps -q --filter "name=^${CONTAINER_NAME}$" --filter "health=healthy" | grep -q .; then
   echo "Error: Cluster container '${CONTAINER_NAME}' is not running or not healthy."
@@ -48,6 +101,7 @@ build_gateway=0
 build_supervisor=0
 needs_helm_upgrade=0
 explicit_target=0
+targets_requested="${*:-auto}"
 
 previous_gateway_fingerprint=""
 previous_supervisor_fingerprint=""
@@ -88,7 +142,9 @@ fi
 
 declare -a changed_files=()
 detect_start=$(date +%s)
-mapfile -t changed_files < <(
+while IFS= read -r path; do
+  changed_files+=("${path}")
+done < <(
   {
     git diff --name-only
     git diff --name-only --cached
@@ -97,6 +153,8 @@ mapfile -t changed_files < <(
 )
 detect_end=$(date +%s)
 log_duration "Change detection" "${detect_start}" "${detect_end}"
+change_detection_duration=$((detect_end - detect_start))
+changed_files_count=${#changed_files[@]}
 
 # Track the cluster container ID so we can detect when the cluster was
 # recreated (e.g. via bootstrap).  A new container means the k3s state is
@@ -288,6 +346,7 @@ echo "Fast deploy plan:"
 echo "  build gateway:    ${build_gateway}"
 echo "  build supervisor: ${build_supervisor}"
 echo "  helm upgrade:     ${needs_helm_upgrade}"
+echo "  cargo profile:    ${CARGO_BUILD_PROFILE}"
 
 if [[ "${explicit_target}" == "0" && "${build_gateway}" == "0" && "${build_supervisor}" == "0" && "${needs_helm_upgrade}" == "0" && "${DEPLOY_FAST_MODE}" != "full" ]]; then
   echo "No new local changes since last deploy."
@@ -316,8 +375,8 @@ if [[ "${build_supervisor}" == "1" ]]; then
   CLUSTER_ARCH=$(docker image inspect --format '{{.Architecture}}' "${_cluster_image}" 2>/dev/null || echo "amd64")
 
   # Build the supervisor binary using docker buildx with a lightweight build.
-  # We use the same cross-build.sh helpers as the full cluster image but only
-  # compile openshell-sandbox, then extract the binary via --output.
+  # Use the dedicated supervisor-export target to avoid copying the entire
+  # builder filesystem (target cache) back to the host.
   SUPERVISOR_BUILD_DIR=$(mktemp -d)
   trap 'rm -rf "${SUPERVISOR_BUILD_DIR}"' EXIT
 
@@ -332,11 +391,19 @@ if [[ "${build_supervisor}" == "1" ]]; then
     fi
   fi
 
+  SUPERVISOR_PROFILE_ARGS=(--build-arg "OPENSHELL_CARGO_PROFILE=${CARGO_BUILD_PROFILE}")
+  SUPERVISOR_RUST_SCOPE=${RUST_TOOLCHAIN_SCOPE:-$(detect_rust_scope "deploy/docker/Dockerfile.cluster")}
+  SUPERVISOR_LOCK_HASH=$(sha256_16 Cargo.lock)
+  SUPERVISOR_SCOPE_INPUT="v2|cluster|base|${SUPERVISOR_LOCK_HASH}|${SUPERVISOR_RUST_SCOPE}|${CARGO_BUILD_PROFILE}"
+  SUPERVISOR_CACHE_SCOPE=$(printf '%s' "${SUPERVISOR_SCOPE_INPUT}" | sha256_16_stdin)
+
   docker buildx build \
     --file deploy/docker/Dockerfile.cluster \
-    --target supervisor-builder \
+    --target supervisor-export \
     --build-arg "BUILDARCH=$(docker version --format '{{.Server.Arch}}')" \
     --build-arg "TARGETARCH=${CLUSTER_ARCH}" \
+    --build-arg "CARGO_TARGET_CACHE_SCOPE=${SUPERVISOR_CACHE_SCOPE}" \
+    ${SUPERVISOR_PROFILE_ARGS[@]+"${SUPERVISOR_PROFILE_ARGS[@]}"} \
     ${SUPERVISOR_VERSION_ARGS[@]+"${SUPERVISOR_VERSION_ARGS[@]}"} \
     --output "type=local,dest=${SUPERVISOR_BUILD_DIR}" \
     --platform "linux/${CLUSTER_ARCH}" \
@@ -344,17 +411,19 @@ if [[ "${build_supervisor}" == "1" ]]; then
 
   # Copy the built binary into the running k3s container
   docker exec "${CONTAINER_NAME}" mkdir -p /opt/openshell/bin
-  docker cp "${SUPERVISOR_BUILD_DIR}/build/out/openshell-sandbox" \
+  docker cp "${SUPERVISOR_BUILD_DIR}/openshell-sandbox" \
     "${CONTAINER_NAME}:/opt/openshell/bin/openshell-sandbox"
   docker exec "${CONTAINER_NAME}" chmod 755 /opt/openshell/bin/openshell-sandbox
 
   built_components+=("supervisor")
   supervisor_end=$(date +%s)
   log_duration "Supervisor build + deploy" "${supervisor_start}" "${supervisor_end}"
+  supervisor_duration=$((supervisor_end - supervisor_start))
 fi
 
 build_end=$(date +%s)
 log_duration "Builds" "${build_start}" "${build_end}"
+builds_duration=$((build_end - build_start))
 
 # Push rebuilt gateway image to local registry.
 declare -a pushed_images=()
@@ -373,6 +442,7 @@ if [[ "${#pushed_images[@]}" -gt 0 ]]; then
   done
   push_end=$(date +%s)
   log_duration "Image push" "${push_start}" "${push_end}"
+  image_push_duration=$((push_end - push_start))
 fi
 
 # Evict rebuilt gateway image from k3s containerd cache so new pods pull
@@ -428,6 +498,7 @@ if [[ "${needs_helm_upgrade}" == "1" ]]; then
     ${helm_wait_args}"
   helm_end=$(date +%s)
   log_duration "Helm upgrade" "${helm_start}" "${helm_end}"
+  helm_upgrade_duration=$((helm_end - helm_start))
 fi
 
 if [[ "${build_gateway}" == "1" ]]; then
@@ -444,6 +515,7 @@ if [[ "${build_gateway}" == "1" ]]; then
   fi
   rollout_end=$(date +%s)
   log_duration "Gateway rollout" "${rollout_start}" "${rollout_end}"
+  gateway_rollout_duration=$((rollout_end - rollout_start))
 fi
 
 if [[ "${build_supervisor}" == "1" ]]; then
@@ -465,5 +537,48 @@ fi
 
 overall_end=$(date +%s)
 log_duration "Total deploy" "${overall_start}" "${overall_end}"
+total_duration=$((overall_end - overall_start))
+
+cat > "${DEPLOY_REPORT_FILE}" <<EOF
+# Cluster Deploy Report
+
+- transaction_id: \`${DEPLOY_TX_ID}\`
+- timestamp_utc: \`$(date -u +"%Y-%m-%dT%H:%M:%SZ")\`
+- cluster_name: \`${CLUSTER_NAME}\`
+- container_name: \`${CONTAINER_NAME}\`
+- explicit_target: \`${explicit_target}\`
+- targets_requested: \`${targets_requested}\`
+- deploy_fast_mode: \`${DEPLOY_FAST_MODE}\`
+- cargo_build_profile: \`${CARGO_BUILD_PROFILE}\`
+- changed_files_count: \`${changed_files_count}\`
+
+## Plan
+
+- build_gateway: \`${build_gateway}\`
+- build_supervisor: \`${build_supervisor}\`
+- helm_upgrade: \`${needs_helm_upgrade}\`
+- force_helm_upgrade: \`${FORCE_HELM_UPGRADE}\`
+
+## Fingerprints
+
+- gateway_previous: \`${previous_gateway_fingerprint}\`
+- gateway_current: \`${current_gateway_fingerprint}\`
+- supervisor_previous: \`${previous_supervisor_fingerprint}\`
+- supervisor_current: \`${current_supervisor_fingerprint}\`
+- helm_previous: \`${previous_helm_fingerprint}\`
+- helm_current: \`${current_helm_fingerprint}\`
+
+## Durations Seconds
+
+- change_detection: \`${change_detection_duration}\`
+- builds_total: \`${builds_duration}\`
+- supervisor_build_deploy: \`${supervisor_duration}\`
+- image_push: \`${image_push_duration}\`
+- helm_upgrade: \`${helm_upgrade_duration}\`
+- gateway_rollout: \`${gateway_rollout_duration}\`
+- total: \`${total_duration}\`
+EOF
+
+echo "Deploy report: ${DEPLOY_REPORT_FILE}"
 
 echo "Deploy complete!"

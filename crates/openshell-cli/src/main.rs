@@ -742,10 +742,17 @@ enum GatewayCommands {
 
         /// Destroy and recreate the gateway from scratch if one already exists.
         ///
-        /// Without this flag, an interactive prompt asks whether to recreate;
-        /// in non-interactive mode the existing gateway is reused silently.
+        /// Without this flag, an interactive prompt asks whether to recreate.
+        /// In non-interactive mode, the command fails unless `--reuse-ok` is set.
         #[arg(long)]
         recreate: bool,
+
+        /// Reuse an existing gateway in non-interactive mode.
+        ///
+        /// Use this in automation when you intentionally want idempotent reuse.
+        /// Conflicts with `--recreate`.
+        #[arg(long, conflicts_with = "recreate")]
+        reuse_ok: bool,
 
         /// Listen on plaintext HTTP instead of mTLS.
         ///
@@ -1445,6 +1452,7 @@ async fn main() -> Result<()> {
                 port,
                 gateway_host,
                 recreate,
+                reuse_ok,
                 plaintext,
                 disable_gateway_auth,
                 registry_username,
@@ -1458,6 +1466,7 @@ async fn main() -> Result<()> {
                     port,
                     gateway_host.as_deref(),
                     recreate,
+                    reuse_ok,
                     plaintext,
                     disable_gateway_auth,
                     registry_username.as_deref(),

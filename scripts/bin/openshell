@@ -25,8 +25,12 @@ else
   # Current HEAD commit (detects branch switches, pulls, rebases)
   current_head=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
 
-  # Collect dirty (modified, staged, untracked) files
-  mapfile -t changed_files < <(
+  # Collect dirty (modified, staged, untracked) files.
+  # Use a bash-3-compatible read loop (macOS default bash has no mapfile).
+  changed_files=()
+  while IFS= read -r path; do
+    changed_files+=("$path")
+  done < <(
     {
       git diff --name-only 2>/dev/null
       git diff --name-only --cached 2>/dev/null
@@ -95,7 +99,10 @@ if [[ "$needs_build" == "1" ]]; then
   cd "$PROJECT_ROOT"
   new_head=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
   # Recompute fingerprint of remaining dirty files (build may not change them)
-  mapfile -t post_files < <(
+  post_files=()
+  while IFS= read -r path; do
+    post_files+=("$path")
+  done < <(
     {
       git diff --name-only 2>/dev/null
       git diff --name-only --cached 2>/dev/null

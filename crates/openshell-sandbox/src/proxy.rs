@@ -123,7 +123,7 @@ impl ProxyHandle {
     /// The proxy uses OPA for network decisions with process-identity binding
     /// via `/proc/net/tcp`. All connections are evaluated through OPA policy.
     #[allow(clippy::too_many_arguments)]
-    pub async fn start_with_bind_addr(
+    pub(crate) async fn start_with_bind_addr(
         policy: &ProxyPolicy,
         bind_addr: Option<SocketAddr>,
         opa_engine: Arc<OpaEngine>,

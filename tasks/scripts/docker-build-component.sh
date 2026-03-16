@@ -133,6 +133,16 @@ if [[ -n "${SCCACHE_MEMCACHED_ENDPOINT:-}" ]]; then
   SCCACHE_ARGS=(--build-arg "SCCACHE_MEMCACHED_ENDPOINT=${SCCACHE_MEMCACHED_ENDPOINT}")
 fi
 
+CARGO_BUILD_PROFILE="${OPENSHELL_CARGO_PROFILE:-}"
+if [[ -z "${CARGO_BUILD_PROFILE}" ]]; then
+  if [[ -n "${CI:-}" ]]; then
+    CARGO_BUILD_PROFILE="release"
+  else
+    CARGO_BUILD_PROFILE="local-fast"
+  fi
+fi
+PROFILE_ARGS=(--build-arg "OPENSHELL_CARGO_PROFILE=${CARGO_BUILD_PROFILE}")
+
 VERSION_ARGS=()
 if [[ -n "${OPENSHELL_CARGO_VERSION:-}" ]]; then
   VERSION_ARGS=(--build-arg "OPENSHELL_CARGO_VERSION=${OPENSHELL_CARGO_VERSION}")
@@ -143,7 +153,7 @@ fi
 
 LOCK_HASH=$(sha256_16 Cargo.lock)
 RUST_SCOPE=${RUST_TOOLCHAIN_SCOPE:-$(detect_rust_scope "${DOCKERFILE}")}
-CACHE_SCOPE_INPUT="v1|${COMPONENT}|${VARIANT:-base}|${LOCK_HASH}|${RUST_SCOPE}"
+CACHE_SCOPE_INPUT="v2|${COMPONENT}|${VARIANT:-base}|${LOCK_HASH}|${RUST_SCOPE}|${CARGO_BUILD_PROFILE}"
 CARGO_TARGET_CACHE_SCOPE=$(printf '%s' "${CACHE_SCOPE_INPUT}" | sha256_16_stdin)
 
 docker buildx build \
@@ -151,6 +161,7 @@ docker buildx build \
   ${DOCKER_PLATFORM:+--platform ${DOCKER_PLATFORM}} \
   ${CACHE_ARGS[@]+"${CACHE_ARGS[@]}"} \
   ${SCCACHE_ARGS[@]+"${SCCACHE_ARGS[@]}"} \
+  ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} \
   ${VERSION_ARGS[@]+"${VERSION_ARGS[@]}"} \
   --build-arg "CARGO_TARGET_CACHE_SCOPE=${CARGO_TARGET_CACHE_SCOPE}" \
   -f "${DOCKERFILE}" \

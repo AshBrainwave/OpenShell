@@ -16,6 +16,16 @@ if [ "${MODE}" != "build" ] && [ "${MODE}" != "fast" ]; then
   exit 1
 fi
 
+DEPLOY_TX_ID=${DEPLOY_TX_ID:-"tx-$(date +%Y%m%d-%H%M%S)-$RANDOM"}
+DEPLOY_REPORT_DIR=${DEPLOY_REPORT_DIR:-.cache/deploy-reports}
+DEPLOY_REPORT_FILE="${DEPLOY_REPORT_DIR}/${DEPLOY_TX_ID}.md"
+overall_start=$(date +%s)
+recreated_cluster=0
+pushed_gateway=0
+built_cluster_image=0
+
+mkdir -p "${DEPLOY_REPORT_DIR}"
+
 if [ -n "${IMAGE_TAG:-}" ]; then
   IMAGE_TAG=${IMAGE_TAG}
 else
@@ -122,8 +132,8 @@ is_local_registry_host() {
 }
 
 registry_reachable() {
-  curl -4 -fsS --max-time 2 "http://127.0.0.1:5000/v2/" >/dev/null 2>&1 || \
-    curl -4 -fsS --max-time 2 "http://localhost:5000/v2/" >/dev/null 2>&1
+  curl -fsS --max-time 2 "http://127.0.0.1:5000/v2/" >/dev/null 2>&1 || \
+    curl -fsS --max-time 2 "http://localhost:5000/v2/" >/dev/null 2>&1
 }
 
 wait_for_registry_ready() {
@@ -172,12 +182,23 @@ ensure_local_registry() {
     return
   fi
 
+  # Docker Desktop occasionally leaves published ports in a bad state after
+  # daemon/network churn. Recreate once before failing hard.
+  echo "Local registry probe failed; recreating registry container and retrying..." >&2
+  docker rm -f "${LOCAL_REGISTRY_CONTAINER}" >/dev/null 2>&1 || true
+  docker run -d --restart=always --name "${LOCAL_REGISTRY_CONTAINER}" -p 5000:5000 registry:2 >/dev/null
+
+  if wait_for_registry_ready 20 1; then
+    return
+  fi
+
   if registry_reachable; then
     return
   fi
 
   echo "Error: local registry is not reachable at ${REGISTRY_HOST}." >&2
   echo "       Ensure a registry is running on port 5000 (e.g. docker run -d --name openshell-local-registry -p 5000:5000 registry:2)." >&2
+  echo "       Active docker context: $(docker context show 2>/dev/null || echo unknown)" >&2
   docker ps -a >&2 || true
   docker logs "${LOCAL_REGISTRY_CONTAINER}" >&2 || true
   exit 1
@@ -217,6 +238,7 @@ if [ "${MODE}" = "fast" ]; then
   if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1 || docker volume inspect "${VOLUME_NAME}" >/dev/null 2>&1; then
     echo "Recreating cluster '${CLUSTER_NAME}' from scratch..."
     openshell gateway destroy --name "${CLUSTER_NAME}"
+    recreated_cluster=1
   fi
 fi
 
@@ -224,6 +246,7 @@ if [ "${SKIP_IMAGE_PUSH:-}" = "1" ]; then
   echo "Skipping image push (SKIP_IMAGE_PUSH=1; images already in registry)."
 elif [ "${MODE}" = "build" ] || [ "${MODE}" = "fast" ]; then
   tasks/scripts/cluster-push-component.sh gateway
+  pushed_gateway=1
 fi
 
 # Build the cluster image so it contains the latest Helm chart, manifests,
@@ -231,6 +254,7 @@ fi
 # always starts with the correct chart version.
 if [ "${SKIP_CLUSTER_IMAGE_BUILD:-}" != "1" ]; then
   tasks/scripts/docker-build-cluster.sh
+  built_cluster_image=1
 fi
 
 # In fast/build modes, use the locally-built cluster image rather than the
@@ -267,6 +291,27 @@ fi
 # into the freshly pushed images.
 DEPLOY_FAST_STATE_FILE=${DEPLOY_FAST_STATE_FILE:-.cache/cluster-deploy-fast.state}
 rm -f "${DEPLOY_FAST_STATE_FILE}"
+
+overall_end=$(date +%s)
+total_duration=$((overall_end - overall_start))
+
+cat > "${DEPLOY_REPORT_FILE}" <<EOF
+# Cluster Bootstrap Report
+
+- transaction_id: \`${DEPLOY_TX_ID}\`
+- timestamp_utc: \`$(date -u +"%Y-%m-%dT%H:%M:%SZ")\`
+- mode: \`${MODE}\`
+- cluster_name: \`${CLUSTER_NAME}\`
+- gateway_port: \`${GATEWAY_PORT}\`
+- image_repo_base: \`${IMAGE_REPO_BASE}\`
+- image_tag: \`${IMAGE_TAG}\`
+- recreated_cluster: \`${recreated_cluster}\`
+- pushed_gateway: \`${pushed_gateway}\`
+- built_cluster_image: \`${built_cluster_image}\`
+- total_duration_seconds: \`${total_duration}\`
+EOF
+
+echo "Deploy report: ${DEPLOY_REPORT_FILE}"
 
 echo ""
 echo "Cluster '${CLUSTER_NAME}' is ready."

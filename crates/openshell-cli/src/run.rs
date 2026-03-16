@@ -1315,6 +1315,7 @@ pub async fn gateway_admin_deploy(
     port: u16,
     gateway_host: Option<&str>,
     recreate: bool,
+    reuse_ok: bool,
     disable_tls: bool,
     disable_gateway_auth: bool,
     registry_username: Option<&str>,
@@ -1334,21 +1335,22 @@ pub async fn gateway_admin_deploy(
     });
 
     // Check whether a gateway already exists. If so, prompt the user (unless
-    // --recreate was passed or we're in non-interactive mode).
+    // --recreate was passed). Non-interactive mode now fails by default unless
+    // --reuse-ok is explicitly set.
     let mut should_recreate = recreate;
     if let Some(existing) =
         openshell_bootstrap::check_existing_deployment(name, remote_opts.as_ref()).await?
     {
+        let status = if existing.container_running {
+            "running"
+        } else if existing.container_exists {
+            "stopped"
+        } else {
+            "volume only"
+        };
         if !should_recreate {
             let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
             if interactive {
-                let status = if existing.container_running {
-                    "running"
-                } else if existing.container_exists {
-                    "stopped"
-                } else {
-                    "volume only"
-                };
                 eprintln!();
                 eprintln!(
                     "{} Gateway '{name}' already exists ({status}).",
@@ -1371,10 +1373,17 @@ pub async fn gateway_admin_deploy(
                     eprintln!("Keeping existing gateway.");
                     return Ok(());
                 }
-            } else {
-                // Non-interactive mode: reuse existing gateway silently.
-                eprintln!("Gateway '{name}' already exists, reusing.");
+            } else if reuse_ok {
+                eprintln!("Gateway '{name}' already exists ({status}), reusing (--reuse-ok).");
                 return Ok(());
+            } else {
+                return Err(miette::miette!(
+                    "Gateway '{name}' already exists ({status}).\n\
+                     Non-interactive mode requires explicit intent.\n\
+                     Re-run with one of:\n\
+                       --reuse-ok   # keep existing gateway\n\
+                       --recreate   # destroy and redeploy"
+                ));
             }
         }
     }
