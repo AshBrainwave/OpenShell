@@ -436,8 +436,9 @@
 </tbody>
 </table>
 </div>
-<section id="step-1-create-a-provider">
-<h2>Step 1: Create a Provider<a class="headerlink" href="#step-1-create-a-provider" title="Link to this heading">#</a></h2>
+<p>For a list of tested providers and their base URLs, refer to <a class="reference internal" href="../sandboxes/manage-providers.html#supported-inference-providers"><span class="std std-ref">Supported Inference Providers</span></a>.</p>
+<section id="create-a-provider">
+<h2>Create a Provider<a class="headerlink" href="#create-a-provider" title="Link to this heading">#</a></h2>
 <p>Create a provider that holds the backend credentials you want OpenShell to use.</p>
 <div class="sd-tab-set docutils">
 <input checked="checked" id="sd-tab-item-0" name="sd-tab-set-0" type="radio">
@@ -450,7 +451,20 @@ NVIDIA API Catalog</label><div class="sd-tab-content docutils">
 </div>
 <input id="sd-tab-item-1" name="sd-tab-set-0" type="radio">
 <label class="sd-tab-label" for="sd-tab-item-1">
-Local / self-hosted endpoint</label><div class="sd-tab-content docutils">
+OpenAI-compatible Provider</label><div class="sd-tab-content docutils">
+<p>Any cloud provider that exposes an OpenAI-compatible API works with the <code class="docutils literal notranslate"><span class="pre">openai</span></code> provider type. You need three values from the provider: the base URL, an API key, and a model name.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>provider<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--name<span class="w"> </span>my-cloud-provider<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--type<span class="w"> </span>openai<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--credential<span class="w"> </span><span class="nv">OPENAI_API_KEY</span><span class="o">=</span>&lt;your_api_key&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--config<span class="w"> </span><span class="nv">OPENAI_BASE_URL</span><span class="o">=</span>https://api.example.com/v1
+</pre></div>
+</div>
+<p>Replace the base URL and API key with the values from your provider. For supported providers out of the box, refer to <a class="reference internal" href="../sandboxes/manage-providers.html#supported-inference-providers"><span class="std std-ref">Supported Inference Providers</span></a>. For other providers, refer to your provider’s documentation for the correct base URL, available models, and API key setup.</p>
+</div>
+<input id="sd-tab-item-2" name="sd-tab-set-0" type="radio">
+<label class="sd-tab-label" for="sd-tab-item-2">
+Local Endpoint</label><div class="sd-tab-content docutils">
 <div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>provider<span class="w"> </span>create<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--name<span class="w"> </span>my-local-model<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--type<span class="w"> </span>openai<span class="w"> </span><span class="se">\</span>
@@ -460,8 +474,8 @@ Local / self-hosted endpoint</label><div class="sd-tab-content docutils">
 </div>
 <p>Use <code class="docutils literal notranslate"><span class="pre">--config</span> <span class="pre">OPENAI_BASE_URL</span></code> to point to any OpenAI-compatible server running where the gateway runs. For host-backed local inference, use <code class="docutils literal notranslate"><span class="pre">host.openshell.internal</span></code> or the host’s LAN IP. Avoid <code class="docutils literal notranslate"><span class="pre">127.0.0.1</span></code> and <code class="docutils literal notranslate"><span class="pre">localhost</span></code>. Set <code class="docutils literal notranslate"><span class="pre">OPENAI_API_KEY</span></code> to a dummy value if the server does not require authentication.</p>
 </div>
-<input id="sd-tab-item-2" name="sd-tab-set-0" type="radio">
-<label class="sd-tab-label" for="sd-tab-item-2">
+<input id="sd-tab-item-3" name="sd-tab-set-0" type="radio">
+<label class="sd-tab-label" for="sd-tab-item-3">
 Anthropic</label><div class="sd-tab-content docutils">
 <div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>provider<span class="w"> </span>create<span class="w"> </span>--name<span class="w"> </span>anthropic-prod<span class="w"> </span>--type<span class="w"> </span>anthropic<span class="w"> </span>--from-existing
 </pre></div>
@@ -470,8 +484,8 @@ Anthropic</label><div class="sd-tab-content docutils">
 </div>
 </div>
 </section>
-<section id="step-2-set-inference-routing">
-<h2>Step 2: Set Inference Routing<a class="headerlink" href="#step-2-set-inference-routing" title="Link to this heading">#</a></h2>
+<section id="set-inference-routing">
+<h2>Set Inference Routing<a class="headerlink" href="#set-inference-routing" title="Link to this heading">#</a></h2>
 <p>Point <code class="docutils literal notranslate"><span class="pre">inference.local</span></code> at that provider and choose the model to use:</p>
 <div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>inference<span class="w"> </span><span class="nb">set</span><span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--provider<span class="w"> </span>nvidia-prod<span class="w"> </span><span class="se">\</span>
@@ -479,8 +493,8 @@ Anthropic</label><div class="sd-tab-content docutils">
 </pre></div>
 </div>
 </section>
-<section id="step-3-verify-the-active-config">
-<h2>Step 3: Verify the Active Config<a class="headerlink" href="#step-3-verify-the-active-config" title="Link to this heading">#</a></h2>
+<section id="verify-the-active-config">
+<h2>Verify the Active Config<a class="headerlink" href="#verify-the-active-config" title="Link to this heading">#</a></h2>
 <p>Confirm that the provider and model are set correctly:</p>
 <div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>inference<span class="w"> </span>get
 <span class="go">Gateway inference:</span>
@@ -491,8 +505,8 @@ Anthropic</label><div class="sd-tab-content docutils">
 </pre></div>
 </div>
 </section>
-<section id="step-4-update-part-of-the-config">
-<h2>Step 4: Update Part of the Config<a class="headerlink" href="#step-4-update-part-of-the-config" title="Link to this heading">#</a></h2>
+<section id="update-part-of-the-config">
+<h2>Update Part of the Config<a class="headerlink" href="#update-part-of-the-config" title="Link to this heading">#</a></h2>
 <p>Use <code class="docutils literal notranslate"><span class="pre">update</span></code> when you want to change only one field:</p>
 <div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>inference<span class="w"> </span>update<span class="w"> </span>--model<span class="w"> </span>nvidia/nemotron-3-nano-30b-a3b
 </pre></div>
@@ -502,8 +516,8 @@ Anthropic</label><div class="sd-tab-content docutils">
 </pre></div>
 </div>
 </section>
-<section id="use-it-from-a-sandbox">
-<h2>Use It from a Sandbox<a class="headerlink" href="#use-it-from-a-sandbox" title="Link to this heading">#</a></h2>
+<section id="use-the-local-endpoint-from-a-sandbox">
+<h2>Use the Local Endpoint from a Sandbox<a class="headerlink" href="#use-the-local-endpoint-from-a-sandbox" title="Link to this heading">#</a></h2>
 <p>After inference is configured, code inside any sandbox can call <code class="docutils literal notranslate"><span class="pre">https://inference.local</span></code> directly:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">openai</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenAI</span>
 
@@ -602,11 +616,11 @@ Anthropic</label><div class="sd-tab-content docutils">
   </div>
   <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="visible nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-1-create-a-provider">Step 1: Create a Provider</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-2-set-inference-routing">Step 2: Set Inference Routing</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-3-verify-the-active-config">Step 3: Verify the Active Config</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-4-update-part-of-the-config">Step 4: Update Part of the Config</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#use-it-from-a-sandbox">Use It from a Sandbox</a><ul class="nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#create-a-provider">Create a Provider</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#set-inference-routing">Set Inference Routing</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#verify-the-active-config">Verify the Active Config</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#update-part-of-the-config">Update Part of the Config</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#use-the-local-endpoint-from-a-sandbox">Use the Local Endpoint from a Sandbox</a><ul class="nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#verify-the-endpoint-from-a-sandbox">Verify the Endpoint from a Sandbox</a></li>
 </ul>
 </li>

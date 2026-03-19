@@ -454,7 +454,7 @@ The following table summarizes how OpenShell handles inference traffic.</p>
 <td><p>One provider and one model define sandbox inference for the active gateway. Every sandbox on that gateway sees the same <code class="docutils literal notranslate"><span class="pre">inference.local</span></code> backend.</p></td>
 </tr>
 <tr class="row-even"><td><p>Provider support</p></td>
-<td><p>OpenAI, Anthropic, and NVIDIA providers all work through the same endpoint.</p></td>
+<td><p>NVIDIA, any OpenAI-compatible provider, and Anthropic all work through the same endpoint.</p></td>
 </tr>
 <tr class="row-odd"><td><p>Hot-refresh</p></td>
 <td><p>OpenShell picks up provider credential changes and inference updates without recreating sandboxes. Changes propagate within about 5 seconds by default.</p></td>
