@@ -50,6 +50,21 @@ description = "Stage the gateway sidecar runtime bundle next to local build outp
 run = "tasks/scripts/bundle-vm-runtime.sh"
 hide = false
 
+["vm:build-custom-runtime"]
+description = "Build a custom libkrunfw with bridge/netfilter kernel support"
+run = "crates/openshell-vm/runtime/build-custom-libkrunfw.sh"
+hide = false
+
+["vm:verify"]
+description = "Run the VM verification matrix against a running gateway"
+run = "crates/openshell-vm/scripts/verify-vm.sh"
+hide = false
+
+["vm:check-capabilities"]
+description = "Check VM kernel capabilities (run inside the VM)"
+run = "echo 'This script must be run inside the VM. Copy it to the rootfs or exec into a running VM.'"
+hide = false
+
 ["vm:package:gateway"]
 description = "Package the gateway binary with its sidecar runtime bundle"
 run = "tasks/scripts/package-gateway-runtime.sh"

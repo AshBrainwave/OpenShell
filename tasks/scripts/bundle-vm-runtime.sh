@@ -51,6 +51,14 @@ if [ "${#KRUNFW_FILES[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# Check for provenance.json (custom runtime indicator)
+PROVENANCE_FILE="${LIB_DIR}/provenance.json"
+IS_CUSTOM="false"
+if [ -f "$PROVENANCE_FILE" ]; then
+  IS_CUSTOM="true"
+  echo "custom runtime detected (provenance.json present)"
+fi
+
 TARGETS=(
   "${ROOT}/target/debug"
   "${ROOT}/target/release"
@@ -68,16 +76,25 @@ for target_dir in "${TARGETS[@]}"; do
     install -m 0644 "$krunfw" "${runtime_dir}/$(basename "$krunfw")"
   done
 
+  # Copy provenance.json if this is a custom runtime.
+  if [ "$IS_CUSTOM" = "true" ] && [ -f "$PROVENANCE_FILE" ]; then
+    install -m 0644 "$PROVENANCE_FILE" "${runtime_dir}/provenance.json"
+  fi
+
   manifest_entries=()
   manifest_entries+=('    "libkrun.dylib"')
   manifest_entries+=('    "gvproxy"')
   for krunfw in "${KRUNFW_FILES[@]}"; do
     manifest_entries+=("    \"$(basename "$krunfw")\"")
   done
+  if [ "$IS_CUSTOM" = "true" ]; then
+    manifest_entries+=('    "provenance.json"')
+  fi
 
   cat > "${runtime_dir}/manifest.json" <<EOF
 {
   "target": "aarch64-apple-darwin",
+  "custom": ${IS_CUSTOM},
   "files": [
 $(IFS=$',\n'; printf '%s\n' "${manifest_entries[*]}")
   ]

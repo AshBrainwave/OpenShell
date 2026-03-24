@@ -285,6 +285,34 @@ fn validate_runtime_dir(dir: &Path) -> Result<PathBuf, VmError> {
         }
     }
 
+    // Validate manifest.json if present — warn but don't fail if files
+    // listed in the manifest are missing (backwards compatibility).
+    let manifest_path = dir.join("manifest.json");
+    if manifest_path.is_file() {
+        if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
+            // Simple check: verify all listed files exist.
+            // The manifest lists files as JSON strings in a "files" array.
+            for line in contents.lines() {
+                let trimmed = line.trim().trim_matches(|c| c == '"' || c == ',');
+                if !trimmed.is_empty()
+                    && !trimmed.starts_with('{')
+                    && !trimmed.starts_with('}')
+                    && !trimmed.starts_with('[')
+                    && !trimmed.starts_with(']')
+                    && !trimmed.contains(':')
+                {
+                    let file_path = dir.join(trimmed);
+                    if !file_path.exists() {
+                        eprintln!(
+                            "warning: manifest.json references missing file: {}",
+                            trimmed
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Ok(gvproxy)
 }
 
@@ -330,6 +358,60 @@ fn raise_nofile_limit() {
             rlim.rlim_cur = rlim.rlim_max;
             let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
         }
+    }
+}
+
+/// Log runtime provenance information for diagnostics.
+///
+/// Prints the libkrun/libkrunfw versions, artifact hashes, and whether
+/// a custom runtime is in use. This makes it easy to correlate VM issues
+/// with the specific runtime bundle.
+fn log_runtime_provenance(runtime_dir: &Path) {
+    if let Some(prov) = ffi::runtime_provenance() {
+        eprintln!("runtime: {}", runtime_dir.display());
+        for krunfw in &prov.libkrunfw_paths {
+            let name = krunfw
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            eprintln!("  libkrunfw: {name}");
+        }
+        if let Some(ref sha) = prov.libkrunfw_sha256 {
+            let short = if sha.len() > 12 { &sha[..12] } else { sha };
+            eprintln!("  sha256: {short}...");
+        }
+        if prov.is_custom {
+            eprintln!("  type: custom (OpenShell-built)");
+            // Parse provenance.json for additional details.
+            if let Some(ref json) = prov.provenance_json {
+                // Extract key fields without pulling in serde_json for this.
+                for key in &["libkrunfw_commit", "kernel_version", "build_timestamp"] {
+                    if let Some(val) = extract_json_string(json, key) {
+                        eprintln!("  {}: {}", key.replace('_', "-"), val);
+                    }
+                }
+            }
+        } else {
+            eprintln!("  type: stock (system/homebrew)");
+        }
+    }
+}
+
+/// Simple JSON string value extractor (avoids serde_json dependency
+/// for this single use case).
+fn extract_json_string(json: &str, key: &str) -> Option<String> {
+    let pattern = format!("\"{}\"", key);
+    let idx = json.find(&pattern)?;
+    let after_key = &json[idx + pattern.len()..];
+    // Skip whitespace and colon
+    let after_colon = after_key.trim_start().strip_prefix(':')?;
+    let after_ws = after_colon.trim_start();
+    if after_ws.starts_with('"') {
+        let value_start = &after_ws[1..];
+        let end = value_start.find('"')?;
+        Some(value_start[..end].to_string())
+    } else {
+        None
     }
 }
 
@@ -624,6 +706,12 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
     })?;
     configure_runtime_loader_env(runtime_dir)?;
     raise_nofile_limit();
+
+    // ── Log runtime provenance ─────────────────────────────────────
+    // After configuring the loader, trigger library loading so that
+    // provenance is captured before we proceed with VM configuration.
+    let _ = ffi::libkrun()?;
+    log_runtime_provenance(runtime_dir);
 
     // ── Configure the microVM ──────────────────────────────────────
 

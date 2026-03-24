@@ -115,6 +115,10 @@ chmod +x "${ROOTFS_DIR}/srv/gateway-init.sh"
 cp "${SCRIPT_DIR}/hello-server.py" "${ROOTFS_DIR}/srv/hello-server.py"
 chmod +x "${ROOTFS_DIR}/srv/hello-server.py"
 
+# Inject VM capability checker for runtime diagnostics.
+cp "${SCRIPT_DIR}/check-vm-capabilities.sh" "${ROOTFS_DIR}/srv/check-vm-capabilities.sh"
+chmod +x "${ROOTFS_DIR}/srv/check-vm-capabilities.sh"
+
 # ── Package and inject helm chart ────────────────────────────────────
 
 HELM_CHART_DIR="${PROJECT_ROOT}/deploy/helm/openshell"

@@ -16,6 +16,21 @@ use libloading::Library;
 
 use crate::VmError;
 
+/// Runtime provenance information extracted from the bundle.
+#[derive(Debug, Clone)]
+pub struct RuntimeProvenance {
+    /// Path to the libkrun library that was loaded.
+    pub libkrun_path: PathBuf,
+    /// Paths to all libkrunfw libraries that were preloaded.
+    pub libkrunfw_paths: Vec<PathBuf>,
+    /// SHA-256 hash of the primary libkrunfw artifact (if computable).
+    pub libkrunfw_sha256: Option<String>,
+    /// Contents of provenance.json if present in the runtime bundle.
+    pub provenance_json: Option<String>,
+    /// Whether this is a custom (OpenShell-built) runtime.
+    pub is_custom: bool,
+}
+
 pub const KRUN_LOG_TARGET_DEFAULT: i32 = -1;
 pub const KRUN_LOG_LEVEL_OFF: u32 = 0;
 pub const KRUN_LOG_LEVEL_ERROR: u32 = 1;
@@ -73,6 +88,7 @@ pub struct LibKrun {
 }
 
 static LIBKRUN: OnceLock<LibKrun> = OnceLock::new();
+static RUNTIME_PROVENANCE: OnceLock<RuntimeProvenance> = OnceLock::new();
 
 pub fn libkrun() -> Result<&'static LibKrun, VmError> {
     if let Some(lib) = LIBKRUN.get() {
@@ -84,12 +100,37 @@ pub fn libkrun() -> Result<&'static LibKrun, VmError> {
     Ok(LIBKRUN.get().expect("libkrun should be initialized"))
 }
 
+/// Return the provenance information for the loaded runtime.
+///
+/// Only available after [`libkrun()`] has been called successfully.
+pub fn runtime_provenance() -> Option<&'static RuntimeProvenance> {
+    RUNTIME_PROVENANCE.get()
+}
+
 impl LibKrun {
     fn load() -> Result<Self, VmError> {
         let path = runtime_libkrun_path()?;
-        preload_runtime_support_libraries(path.parent().ok_or_else(|| {
+        let runtime_dir = path.parent().ok_or_else(|| {
             VmError::HostSetup(format!("libkrun has no parent dir: {}", path.display()))
-        })?)?;
+        })?;
+        let krunfw_paths = preload_runtime_support_libraries(runtime_dir)?;
+
+        // Build and store provenance information.
+        let provenance_json_path = runtime_dir.join("provenance.json");
+        let provenance_json = fs::read_to_string(&provenance_json_path).ok();
+        let is_custom = provenance_json.is_some();
+
+        let libkrunfw_sha256 = krunfw_paths.first().and_then(|p| compute_sha256(p).ok());
+
+        let provenance = RuntimeProvenance {
+            libkrun_path: path.clone(),
+            libkrunfw_paths: krunfw_paths,
+            libkrunfw_sha256,
+            provenance_json,
+            is_custom,
+        };
+        let _ = RUNTIME_PROVENANCE.set(provenance);
+
         let library = Box::leak(Box::new(unsafe {
             Library::new(&path).map_err(|e| {
                 VmError::HostSetup(format!("load libkrun from {}: {e}", path.display()))
@@ -123,7 +164,7 @@ fn runtime_libkrun_path() -> Result<PathBuf, VmError> {
     Ok(crate::configured_runtime_dir()?.join(required_runtime_lib_name()))
 }
 
-fn preload_runtime_support_libraries(runtime_dir: &Path) -> Result<(), VmError> {
+fn preload_runtime_support_libraries(runtime_dir: &Path) -> Result<Vec<PathBuf>, VmError> {
     let entries = fs::read_dir(runtime_dir)
         .map_err(|e| VmError::HostSetup(format!("read {}: {e}", runtime_dir.display())))?;
 
@@ -149,7 +190,7 @@ fn preload_runtime_support_libraries(runtime_dir: &Path) -> Result<(), VmError> 
 
     support_libs.sort();
 
-    for path in support_libs {
+    for path in &support_libs {
         let path_cstr = std::ffi::CString::new(path.to_string_lossy().as_bytes()).map_err(|e| {
             VmError::HostSetup(format!(
                 "invalid support library path {}: {e}",
@@ -174,7 +215,7 @@ fn preload_runtime_support_libraries(runtime_dir: &Path) -> Result<(), VmError> 
         }
     }
 
-    Ok(())
+    Ok(support_libs)
 }
 
 fn required_runtime_lib_name() -> &'static str {
@@ -185,6 +226,71 @@ fn required_runtime_lib_name() -> &'static str {
     #[cfg(not(target_os = "macos"))]
     {
         "libkrun.so"
+    }
+}
+
+/// Compute SHA-256 hash of a file, returning hex string.
+fn compute_sha256(path: &Path) -> Result<String, std::io::Error> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let mut hasher = sha2_hasher();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher_update(&mut hasher, &buf[..n]);
+    }
+    Ok(hasher_finalize(hasher))
+}
+
+// Minimal SHA-256 using the sha2 crate if available, otherwise shell out.
+// We attempt a runtime `shasum` call to avoid adding a crate dependency.
+fn sha2_hasher() -> Sha256State {
+    Sha256State {
+        data: Vec::with_capacity(1024 * 1024),
+    }
+}
+
+struct Sha256State {
+    data: Vec<u8>,
+}
+
+fn hasher_update(state: &mut Sha256State, bytes: &[u8]) {
+    state.data.extend_from_slice(bytes);
+}
+
+fn hasher_finalize(state: Sha256State) -> String {
+    // Use shasum via process for simplicity — avoids adding a crypto dependency.
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = match Command::new("shasum")
+        .args(["-a", "256"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return "unknown".to_string(),
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(&state.data);
+    }
+
+    match child.wait_with_output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_string()
+        }
+        _ => "unknown".to_string(),
     }
 }
 
