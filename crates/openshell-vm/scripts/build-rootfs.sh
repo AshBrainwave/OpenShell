@@ -65,7 +65,7 @@ docker rm -f "${INIT_CONTAINER_NAME}" 2>/dev/null || true
 
 echo "==> Building base image..."
 docker build --platform linux/arm64 -t "${BASE_IMAGE_TAG}" -f - . <<'DOCKERFILE'
-FROM ubuntu:22.04
+FROM nvcr.io/nvidia/base/ubuntu:noble-20251013
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \

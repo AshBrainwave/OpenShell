@@ -146,8 +146,7 @@ impl VmConfig {
     ///
     /// Runs `/srv/gateway-init.sh` which mounts essential filesystems,
     /// deploys the OpenShell helm chart, and execs `k3s server`.
-    /// Exposes the Kubernetes API on port 6443 and the OpenShell
-    /// gateway (`NodePort`) on port 30051.
+    /// Exposes the OpenShell gateway on port 30051.
     pub fn gateway(rootfs: PathBuf) -> Self {
         Self {
             rootfs,
@@ -162,10 +161,6 @@ impl VmConfig {
             ],
             workdir: "/".to_string(),
             port_map: vec![
-                // Map host 6443 -> guest 6444 (real kube-apiserver).
-                // The k3s dynamiclistener on 6443 has TLS issues through
-                // port forwarding, so we go directly to the apiserver.
-                "6443:6444".to_string(),
                 // Navigator server — with hostNetwork the server binds
                 // directly to port 8080 on the VM's interface, bypassing
                 // NodePort (which requires kube-proxy / iptables).
@@ -369,6 +364,7 @@ fn raise_nofile_limit() {
 fn log_runtime_provenance(runtime_dir: &Path) {
     if let Some(prov) = ffi::runtime_provenance() {
         eprintln!("runtime: {}", runtime_dir.display());
+        eprintln!("  libkrun: {}", prov.libkrun_path.display());
         for krunfw in &prov.libkrunfw_paths {
             let name = krunfw
                 .file_name()
@@ -993,8 +989,6 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
 
                     match std::fs::read_to_string(&kubeconfig_src) {
                         Ok(contents) => {
-                            // The kubeconfig has server: https://127.0.0.1:6443
-                            // which is correct since we forward host:6443 -> guest:6444.
                             if let Err(e) = std::fs::write(&dest, &contents) {
                                 eprintln!("  failed to write kubeconfig: {e}");
                             } else {

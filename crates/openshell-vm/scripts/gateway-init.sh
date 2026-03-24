@@ -153,14 +153,16 @@ find /run -name '*.sock' -delete 2>/dev/null || true
 #
 # The kine (SQLite) DB cleanup in build-rootfs.sh already removes stale
 # pod/sandbox records from k3s etcd, preventing kubelet from reconciling
-# against stale sandboxes. Containerd's internal sandbox records in
-# meta.db are harmless because the CRI plugin reconciles with kubelet
-# on startup — any sandboxes unknown to kubelet are cleaned up gracefully
-# without triggering SandboxChanged events.
+# against stale sandboxes.
 CONTAINERD_DIR="/var/lib/rancher/k3s/agent/containerd"
 if [ -d "$CONTAINERD_DIR" ]; then
     # Remove runtime task state (stale shim PIDs, sockets from dead processes).
     rm -rf "${CONTAINERD_DIR}/io.containerd.runtime.v2.task" 2>/dev/null || true
+    # Remove sandbox controller shim state. Stale sandbox records cause
+    # containerd to reuse network namespaces from previous boots, which
+    # already have routes configured. The CNI bridge plugin then fails
+    # with "file exists" when adding the default route on retry.
+    rm -rf "${CONTAINERD_DIR}/io.containerd.sandbox.controller.v1.shim" 2>/dev/null || true
     # Clean stale ingest temp files from the content store.
     rm -rf "${CONTAINERD_DIR}/io.containerd.content.v1.content/ingest" 2>/dev/null || true
     mkdir -p "${CONTAINERD_DIR}/io.containerd.content.v1.content/ingest"
@@ -170,6 +172,83 @@ fi
 rm -rf /run/k3s 2>/dev/null || true
 
 ts "stale artifacts cleaned"
+
+# ── Clean stale CNI / pod networking state ──────────────────────────────
+# The rootfs persists across VM restarts via virtio-fs. Previous pod
+# sandboxes leave behind veth pairs, bridge routes, host-local IPAM
+# allocations, and network namespaces. If not cleaned, the bridge CNI
+# plugin fails with:
+#   "failed to add route ... file exists"
+# because the default route via cni0 already exists from the prior boot,
+# or a stale network namespace already has the route configured.
+
+# Tear down the CNI bridge and its associated routes.
+if ip link show cni0 >/dev/null 2>&1; then
+    ip link set cni0 down 2>/dev/null || true
+    ip link delete cni0 2>/dev/null || true
+    ts "deleted stale cni0 bridge"
+fi
+
+# Remove any leftover veth pairs (CNI bridge plugin creates vethXXXX).
+for veth in $(ip -o link show type veth 2>/dev/null | awk -F': ' '{print $2}' | cut -d'@' -f1); do
+    ip link delete "$veth" 2>/dev/null || true
+done
+
+# Flush host-local IPAM allocations so IPs can be reassigned cleanly.
+rm -rf /var/lib/cni/networks 2>/dev/null || true
+rm -rf /var/lib/cni/results 2>/dev/null || true
+
+# Flush any stale CNI-added routes for the pod CIDR. These can conflict
+# with routes the bridge plugin tries to add on the next boot.
+ip route flush 10.42.0.0/24 2>/dev/null || true
+
+# Clean up stale pod network namespaces from previous boots. Containerd
+# creates named netns under /var/run/netns/ for each pod sandbox. If
+# these persist across VM restarts, the CNI bridge plugin fails when
+# adding routes because the stale netns already has the default route
+# configured from the prior boot. Removing all named network namespaces
+# forces containerd to create fresh ones.
+if [ -d /var/run/netns ]; then
+    for ns in $(ip netns list 2>/dev/null | awk '{print $1}'); do
+        ip netns delete "$ns" 2>/dev/null || true
+    done
+fi
+# Also clean the netns bind-mount directory used by containerd/CRI.
+# Containerd may use /run/netns/ or /var/run/netns/ (same via tmpfs).
+rm -rf /run/netns/* 2>/dev/null || true
+rm -rf /var/run/netns/* 2>/dev/null || true
+
+ts "stale CNI networking state cleaned"
+
+# ── Network profile detection ───────────────────────────────────────────
+# Detect early so manifest patching and k3s flags both use the same value.
+#
+# "bridge" is the only supported profile. It requires a custom libkrunfw
+# with CONFIG_BRIDGE, CONFIG_NETFILTER, CONFIG_NF_NAT built in. If the
+# kernel lacks these capabilities the VM cannot run pod networking and we
+# fail fast with an actionable error.
+
+NET_PROFILE="bridge"
+
+ts "network profile: ${NET_PROFILE}"
+
+# Validate that the kernel actually has the required capabilities.
+_caps_ok=true
+if ! ip link add _cap_br0 type bridge 2>/dev/null; then
+    echo "ERROR: kernel lacks bridge support (CONFIG_BRIDGE). Use a custom libkrunfw." >&2
+    _caps_ok=false
+else
+    ip link del _cap_br0 2>/dev/null || true
+fi
+if [ ! -d /proc/sys/net/netfilter ] && [ ! -f /proc/sys/net/bridge/bridge-nf-call-iptables ]; then
+    echo "ERROR: kernel lacks netfilter support (CONFIG_NETFILTER). Use a custom libkrunfw." >&2
+    _caps_ok=false
+fi
+if [ "$_caps_ok" = false ]; then
+    echo "FATAL: required kernel capabilities missing — cannot configure pod networking." >&2
+    echo "See: architecture/custom-vm-runtime.md for build instructions." >&2
+    exit 1
+fi
 
 # ── Deploy bundled manifests (cold boot only) ───────────────────────────
 # On pre-initialized rootfs, manifests are already in place from the
@@ -211,15 +290,13 @@ if [ -f "$HELMCHART" ]; then
     # Use pre-loaded images — don't pull from registry.
     sed -i 's|pullPolicy: Always|pullPolicy: IfNotPresent|' "$HELMCHART"
 
-    if [ "$NET_PROFILE" = "bridge" ]; then
-        # Bridge CNI: pods use normal pod networking, not hostNetwork.
-        sed -i 's|__HOST_NETWORK__|false|g' "$HELMCHART"
-        sed -i 's|__AUTOMOUNT_SA_TOKEN__|true|g' "$HELMCHART"
-    else
-        # Legacy: VM bootstrap runs without CNI bridge networking.
-        sed -i 's|__HOST_NETWORK__|true|g' "$HELMCHART"
-        sed -i 's|__AUTOMOUNT_SA_TOKEN__|false|g' "$HELMCHART"
-    fi
+    # Bridge CNI: pods use normal pod networking, not hostNetwork.
+    # The pre-init in build-rootfs.sh replaces __HOST_NETWORK__ with "true"
+    # for Docker container networking. At VM boot with bridge CNI we need
+    # to override it back to "false" so pods use the CNI bridge network.
+    sed -i 's|hostNetwork: true|hostNetwork: false|g' "$HELMCHART"
+    sed -i 's|__HOST_NETWORK__|false|g' "$HELMCHART"
+    sed -i 's|__AUTOMOUNT_SA_TOKEN__|true|g' "$HELMCHART"
 
     sed -i 's|__KUBECONFIG_HOST_PATH__|"/etc/rancher/k3s"|g' "$HELMCHART"
     sed -i 's|__PERSISTENCE_ENABLED__|false|g' "$HELMCHART"
@@ -231,115 +308,34 @@ fi
 
 AGENT_MANIFEST="$K3S_MANIFESTS/agent-sandbox.yaml"
 if [ -f "$AGENT_MANIFEST" ]; then
-    if [ "$NET_PROFILE" = "bridge" ]; then
-        # Bridge CNI: agent-sandbox uses normal pod networking.
-        # kube-proxy is enabled so kubernetes.default.svc is reachable
-        # via ClusterIP — no need for KUBERNETES_SERVICE_HOST override.
-        sed -i '/hostNetwork: true/d' "$AGENT_MANIFEST"
-        sed -i '/dnsPolicy: ClusterFirstWithHostNet/d' "$AGENT_MANIFEST"
-        ts "agent-sandbox: using pod networking (bridge profile)"
-    else
-        # Legacy: keep agent-sandbox on pod networking to avoid host port
-        # clashes. Point in-cluster client traffic at the API server node
-        # IP because kube-proxy is disabled in VM mode.
-        sed -i '/hostNetwork: true/d' "$AGENT_MANIFEST"
-        sed -i '/dnsPolicy: ClusterFirstWithHostNet/d' "$AGENT_MANIFEST"
-        if ! grep -q 'metrics-bind-address=:8082' "$AGENT_MANIFEST"; then
-            sed -i 's|image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.1.0|image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.1.0\
-            args:\
-            - -metrics-bind-address=:8082\
-            env:\
-            - name: KUBERNETES_SERVICE_HOST\
-              value: 192.168.127.2\
-            - name: KUBERNETES_SERVICE_PORT\
-              value: "6443"|g' "$AGENT_MANIFEST"
-        else
-            sed -i 's|value: 127.0.0.1|value: 192.168.127.2|g' "$AGENT_MANIFEST"
-        fi
-        if grep -q 'hostNetwork: true' "$AGENT_MANIFEST" \
-            || grep -q 'ClusterFirstWithHostNet' "$AGENT_MANIFEST" \
-            || ! grep -q 'KUBERNETES_SERVICE_HOST' "$AGENT_MANIFEST" \
-            || ! grep -q 'metrics-bind-address=:8082' "$AGENT_MANIFEST"; then
-            echo "ERROR: failed to patch agent-sandbox manifest for VM networking constraints: $AGENT_MANIFEST" >&2
-            exit 1
-        fi
-        ts "agent-sandbox: patched for legacy-vm-net (API server override)"
-    fi
+    # Bridge CNI: agent-sandbox uses normal pod networking.
+    # kube-proxy is enabled so kubernetes.default.svc is reachable
+    # via ClusterIP — no need for KUBERNETES_SERVICE_HOST override.
+    sed -i '/hostNetwork: true/d' "$AGENT_MANIFEST"
+    sed -i '/dnsPolicy: ClusterFirstWithHostNet/d' "$AGENT_MANIFEST"
+    ts "agent-sandbox: using pod networking (bridge profile)"
 fi
 
-# local-storage implies local-path-provisioner. In legacy mode it
-# requires CNI bridge networking that is unavailable. In bridge mode
-# it can work but we leave it disabled for now until validated.
-if [ "$NET_PROFILE" != "bridge" ]; then
-    rm -f "$K3S_MANIFESTS/local-storage.yaml" 2>/dev/null || true
-fi
-
-# ── CNI configuration ───────────────────────────────────────────────────
-# Two networking profiles:
-#
-# 1. "bridge" (default when kernel supports it):
-#    Uses the bridge CNI plugin with iptables masquerade. Requires
-#    CONFIG_BRIDGE, CONFIG_NETFILTER, CONFIG_NF_NAT in the VM kernel.
-#    This is the standard Kubernetes CNI path — compatible with
-#    kube-proxy, service VIPs, and portmap.
-#
-# 2. "legacy-vm-net" (fallback for stock libkrunfw without netfilter):
-#    Uses ptp CNI without iptables. No masquerade, no portmap.
-#    kube-proxy must be disabled. This is the original VM path.
-#
-# The profile is auto-detected from kernel capabilities but can be
-# forced via OPENSHELL_VM_NET_PROFILE=bridge|legacy-vm-net.
-
-NET_PROFILE="${OPENSHELL_VM_NET_PROFILE:-auto}"
-
-detect_net_profile() {
-    # Check for bridge + netfilter kernel support.
-    # If we can create a bridge and the netfilter sysctl exists, use bridge CNI.
-    local has_bridge=false
-    local has_netfilter=false
-
-    if ip link add _probe_br0 type bridge 2>/dev/null; then
-        ip link del _probe_br0 2>/dev/null || true
-        has_bridge=true
-    fi
-
-    if [ -d /proc/sys/net/netfilter ] || [ -f /proc/sys/net/bridge/bridge-nf-call-iptables ]; then
-        has_netfilter=true
-    fi
-
-    if [ "$has_bridge" = true ] && [ "$has_netfilter" = true ]; then
-        echo "bridge"
-    else
-        echo "legacy-vm-net"
-    fi
-}
-
-if [ "$NET_PROFILE" = "auto" ]; then
-    NET_PROFILE=$(detect_net_profile)
-fi
-
-ts "network profile: ${NET_PROFILE}"
+# ── CNI configuration (bridge) ──────────────────────────────────────────
+# Uses the bridge CNI plugin with iptables masquerade. Requires
+# CONFIG_BRIDGE, CONFIG_NETFILTER, CONFIG_NF_NAT in the VM kernel
+# (validated above at boot). kube-proxy uses nftables mode for service
+# VIP routing.
 
 CNI_CONF_DIR="/etc/cni/net.d"
 CNI_BIN_DIR="/opt/cni/bin"
 mkdir -p "$CNI_CONF_DIR" "$CNI_BIN_DIR"
 
-if [ "$NET_PROFILE" = "bridge" ]; then
-    # ── Bridge CNI (full Kubernetes networking) ─────────────────────
-    # This path requires a custom libkrunfw with bridge + netfilter
-    # kernel support. Creates a cni0 bridge, uses iptables masquerade,
-    # and is compatible with kube-proxy.
+# Enable IP forwarding (required for masquerade).
+echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
 
-    # Enable IP forwarding (required for masquerade).
-    echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+# Enable bridge netfilter call (required for CNI bridge masquerade to
+# see bridged traffic).
+if [ -f /proc/sys/net/bridge/bridge-nf-call-iptables ]; then
+    echo 1 > /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || true
+fi
 
-    # Enable bridge netfilter call (required for kube-proxy to see
-    # bridged traffic).
-    if [ -f /proc/sys/net/bridge/bridge-nf-call-iptables ]; then
-        echo 1 > /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || true
-    fi
-
-    cat > "$CNI_CONF_DIR/10-bridge.conflist" << 'CNICFG'
+cat > "$CNI_CONF_DIR/10-bridge.conflist" << 'CNICFG'
 {
   "cniVersion": "1.0.0",
   "name": "bridge",
@@ -353,8 +349,7 @@ if [ "$NET_PROFILE" = "bridge" ]; then
       "hairpinMode": true,
       "ipam": {
         "type": "host-local",
-        "ranges": [[{ "subnet": "10.42.0.0/24" }]],
-        "routes": [{ "dst": "0.0.0.0/0" }]
+        "ranges": [[{ "subnet": "10.42.0.0/24" }]]
       }
     },
     {
@@ -369,53 +364,19 @@ if [ "$NET_PROFILE" = "bridge" ]; then
 }
 CNICFG
 
-    # Remove any legacy ptp config.
-    rm -f "$CNI_CONF_DIR/10-ptp.conflist" 2>/dev/null || true
+# Remove any stale legacy ptp config.
+rm -f "$CNI_CONF_DIR/10-ptp.conflist" 2>/dev/null || true
 
-    ts "bridge CNI configured (cni0 + iptables masquerade)"
-else
-    # ── Legacy ptp CNI (iptables-free) ─────────────────────────────
-    # The libkrun VM kernel has no netfilter/iptables support. Flannel's
-    # masquerade rules and kube-proxy both require iptables and crash
-    # without it. We disable both and use a simple ptp CNI with
-    # host-local IPAM instead. This avoids linux bridge requirements.
-    #
-    # ipMasq=false avoids any iptables calls in the plugin.
-    # portmap plugin removed — it requires iptables for DNAT rules.
-
-    cat > "$CNI_CONF_DIR/10-ptp.conflist" << 'CNICFG'
-{
-  "cniVersion": "1.0.0",
-  "name": "ptp",
-  "plugins": [
-    {
-      "type": "ptp",
-      "ipMasq": false,
-      "ipam": {
-        "type": "host-local",
-        "ranges": [[{ "subnet": "10.42.0.0/24" }]],
-        "routes": [{ "dst": "0.0.0.0/0" }]
-      }
-    },
-    {
-      "type": "loopback"
-    }
-  ]
-}
-CNICFG
-
-    # Remove any bridge config.
-    rm -f "$CNI_CONF_DIR/10-bridge.conflist" 2>/dev/null || true
-
-    ts "ptp CNI configured (iptables-free, no linux bridge)"
-fi
+ts "bridge CNI configured (cni0 + iptables masquerade)"
 
 # Symlink k3s-bundled CNI binaries to the default containerd bin path.
 # k3s extracts its tools to /var/lib/rancher/k3s/data/<hash>/bin/.
+# Use -e (not -f) because k3s ships these as symlinks to a `cni` multicall
+# binary.
 K3S_DATA_BIN=$(find /var/lib/rancher/k3s/data -maxdepth 2 -name bin -type d 2>/dev/null | head -1)
 if [ -n "$K3S_DATA_BIN" ]; then
-    for plugin in bridge ptp host-local loopback bandwidth portmap; do
-        [ -f "$K3S_DATA_BIN/$plugin" ] && ln -sf "$K3S_DATA_BIN/$plugin" "$CNI_BIN_DIR/$plugin"
+    for plugin in bridge host-local loopback bandwidth portmap; do
+        [ -e "$K3S_DATA_BIN/$plugin" ] && ln -sf "$K3S_DATA_BIN/$plugin" "$CNI_BIN_DIR/$plugin"
     done
     ts "CNI binaries linked from $K3S_DATA_BIN"
 else
@@ -427,11 +388,15 @@ fi
 rm -f "/var/lib/rancher/k3s/agent/etc/cni/net.d/10-flannel.conflist" 2>/dev/null || true
 
 # ── Start k3s ──────────────────────────────────────────────────────────
-# Flags tuned for fast single-node startup. The k3s flags vary depending
-# on the network profile:
+# Flags tuned for fast single-node startup. Bridge CNI handles pod
+# networking; kube-proxy runs in nftables mode for service VIP / ClusterIP
+# support.
 #
-# bridge: kube-proxy enabled, flannel disabled (bridge CNI handles it)
-# legacy-vm-net: kube-proxy disabled (no iptables), flannel disabled
+# nftables mode: k3s bundles its own iptables binaries whose MARK target
+# doesn't negotiate xt_MARK revision 2 correctly with the libkrun kernel,
+# causing --xor-mark failures. nftables mode uses the kernel's nf_tables
+# subsystem directly and sidesteps the issue entirely. The kernel is
+# configured with CONFIG_NF_TABLES=y and related modules.
 
 K3S_ARGS=(
     --disable=traefik,servicelb,metrics-server,coredns
@@ -443,19 +408,9 @@ K3S_ARGS=(
     --tls-san=localhost,127.0.0.1,10.0.2.15,192.168.127.2
     --flannel-backend=none
     --snapshotter=native
+    --kube-proxy-arg=proxy-mode=nftables
 )
 
-if [ "$NET_PROFILE" = "bridge" ]; then
-    # With bridge CNI + iptables, kube-proxy can run. Don't disable it.
-    # local-storage can also work with bridge networking.
-    ts "starting k3s server (bridge profile — kube-proxy enabled)"
-else
-    # Legacy: no iptables means no kube-proxy and no local-storage.
-    K3S_ARGS+=(
-        --disable=local-storage
-        --disable-kube-proxy
-    )
-    ts "starting k3s server (legacy-vm-net profile — kube-proxy disabled)"
-fi
+ts "starting k3s server (bridge CNI + nftables kube-proxy)"
 
 exec /usr/local/bin/k3s server "${K3S_ARGS[@]}"

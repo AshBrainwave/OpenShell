@@ -9,11 +9,11 @@ The stock `libkrunfw` (from Homebrew) ships a kernel without bridge, netfilter,
 or conntrack support. This means the VM cannot:
 
 - Create `cni0` bridge interfaces (required by the bridge CNI plugin)
-- Run kube-proxy (requires iptables/nftables)
+- Run kube-proxy (requires nftables)
 - Route service VIP traffic (requires NAT/conntrack)
 
 The custom runtime builds libkrunfw with an additional kernel config fragment
-that enables these features.
+that enables these networking and sandboxing features.
 
 ## Directory Structure
 
@@ -21,7 +21,7 @@ that enables these features.
 runtime/
   build-custom-libkrunfw.sh   # Build script for custom libkrunfw
   kernel/
-    bridge-cni.config          # Kernel config fragment (bridge + netfilter)
+    bridge-cni.config          # Kernel config fragment (networking + sandboxing)
 ```
 
 ## Building
@@ -66,23 +66,16 @@ mise run vm:bundle-runtime
 mise run vm
 ```
 
-## Network Profiles
+## Networking
 
-The VM init script (`gateway-init.sh`) auto-detects the kernel capabilities
-and selects the appropriate networking profile:
+The VM uses bridge CNI for pod networking with nftables-mode kube-proxy for
+service VIP / ClusterIP support. The kernel config fragment enables both
+iptables (for CNI bridge masquerade) and nftables (for kube-proxy).
 
-| Profile | Kernel | CNI | kube-proxy | Service VIPs |
-|---------|--------|-----|------------|--------------|
-| `bridge` | Custom (bridge+netfilter) | bridge CNI (`cni0`) | Enabled | Yes |
-| `legacy-vm-net` | Stock (no netfilter) | ptp CNI | Disabled | No (direct IP) |
-
-To force a specific profile:
-
-```bash
-# Inside the VM (set in gateway-init.sh env):
-export OPENSHELL_VM_NET_PROFILE=bridge      # Force bridge CNI
-export OPENSHELL_VM_NET_PROFILE=legacy-vm-net  # Force legacy ptp CNI
-```
+k3s is started with `--kube-proxy-arg=proxy-mode=nftables` because the
+bundled iptables binaries in k3s have revision-negotiation issues with the
+libkrun kernel's xt_MARK module. nftables mode uses the kernel's nf_tables
+subsystem directly and avoids this entirely.
 
 ## Runtime Provenance
 
@@ -158,14 +151,17 @@ If this fails, you are running the stock runtime. Build and use the custom one.
 
 ### kube-proxy CrashLoopBackOff
 
-The kernel does not have netfilter support. Verify:
+kube-proxy runs in nftables mode. If it crashes, verify nftables support:
 ```bash
 # Inside VM:
-iptables -L -n
+nft list ruleset
 ```
 
-If this fails with "iptables not found" or "modprobe: can't change directory",
-the kernel lacks CONFIG_NETFILTER. Use the custom runtime.
+If this fails, the kernel may lack `CONFIG_NF_TABLES`. Use the custom runtime.
+
+Common errors:
+- `unknown option "--xor-mark"`: kube-proxy is running in iptables mode instead
+  of nftables. Verify `--kube-proxy-arg=proxy-mode=nftables` is in the k3s args.
 
 ### Runtime mismatch after upgrade
 

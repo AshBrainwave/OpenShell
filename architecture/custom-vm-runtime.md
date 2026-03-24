@@ -7,8 +7,7 @@ lightweight microVM with Apple Hypervisor.framework (macOS) or KVM (Linux). The 
 is embedded inside `libkrunfw`, a companion library that packages a pre-built Linux kernel.
 
 The stock `libkrunfw` from Homebrew ships a minimal kernel without bridge, netfilter, or
-conntrack support. This limits Kubernetes networking to a point-to-point (ptp) CNI
-configuration without kube-proxy or service VIPs.
+conntrack support. This is insufficient for Kubernetes pod networking.
 
 The custom libkrunfw runtime adds bridge CNI, iptables/nftables, and conntrack support to
 the VM kernel, enabling standard Kubernetes networking.
@@ -31,33 +30,25 @@ Host (macOS/Linux)
 
 Guest VM
 ├── gateway-init.sh (PID 1)
-│   ├── Detects kernel capabilities
-│   ├── Selects network profile: bridge | legacy-vm-net
-│   ├── Configures CNI
+│   ├── Validates kernel capabilities (fail-fast)
+│   ├── Configures bridge CNI
 │   └── Execs k3s server
 └── check-vm-capabilities.sh (diagnostics)
 ```
 
-## Network Profiles
+## Network Profile
 
-The VM init script auto-detects kernel capabilities and selects the appropriate
-networking profile. This can be overridden via `OPENSHELL_VM_NET_PROFILE`.
+The VM uses the bridge CNI profile, which requires a custom libkrunfw with bridge and
+netfilter kernel support. The init script validates these capabilities at boot and fails
+fast with an actionable error if they are missing.
 
-### Bridge Profile (custom runtime)
+### Bridge Profile
 
 - CNI: bridge plugin with `cni0` interface
-- IP masquerade: enabled (iptables)
-- kube-proxy: enabled
+- IP masquerade: enabled (iptables-legacy via CNI bridge plugin)
+- kube-proxy: enabled (nftables mode)
 - Service VIPs: functional (ClusterIP, NodePort)
-- hostNetwork workarounds: removed
-
-### Legacy VM Net Profile (stock runtime)
-
-- CNI: ptp plugin (point-to-point)
-- IP masquerade: disabled (no iptables)
-- kube-proxy: disabled
-- Service VIPs: not functional (direct IP routing only)
-- hostNetwork workarounds: required for some pods
+- hostNetwork workarounds: not required
 
 ## Runtime Provenance
 
@@ -98,10 +89,12 @@ libkrunfw kernel:
 | Netfilter | `CONFIG_NETFILTER` | iptables/nftables framework |
 | Connection tracking | `CONFIG_NF_CONNTRACK` | NAT state tracking |
 | NAT | `CONFIG_NF_NAT` | Service VIP DNAT/SNAT |
-| iptables | `CONFIG_IP_NF_IPTABLES` | kube-proxy iptables mode |
-| nftables | `CONFIG_NF_TABLES` | kube-proxy nft mode (future) |
+| iptables | `CONFIG_IP_NF_IPTABLES` | CNI bridge masquerade |
+| nftables | `CONFIG_NF_TABLES` | kube-proxy nftables mode (primary) |
 | veth | `CONFIG_VETH` | Pod network namespace pairs |
 | IPVS | `CONFIG_IP_VS` | kube-proxy IPVS mode (optional) |
+| Landlock | `CONFIG_SECURITY_LANDLOCK` | Filesystem sandboxing support |
+| Seccomp filter | `CONFIG_SECCOMP_FILTER` | Syscall filtering support |
 
 ## Verification
 
@@ -116,10 +109,9 @@ Two verification tools are provided:
 ## Rollout Strategy
 
 1. Custom runtime support is opt-in via `OPENSHELL_VM_RUNTIME_SOURCE_DIR`.
-2. Auto-detection selects the correct network profile at boot.
-3. The stock runtime path (`legacy-vm-net`) remains the default until the custom
-   runtime is proven stable.
-4. Rollback: unset the env var and re-bundle with stock libraries.
+2. The init script validates kernel capabilities at boot and fails fast if missing.
+3. Rollback: unset the env var and re-bundle with stock libraries (note: stock
+   libraries lack bridge/netfilter and pod networking will not work).
 
 ## Related Files
 

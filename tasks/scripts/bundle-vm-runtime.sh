@@ -35,10 +35,19 @@ if [ -z "$GVPROXY_BIN" ]; then
   fi
 fi
 
+# libkrun.dylib: prefer the custom runtime dir, fall back to Homebrew.
+# libkrun is the VMM and does not need a custom build; only libkrunfw
+# carries the custom kernel.
 LIBKRUN="${LIB_DIR}/libkrun.dylib"
 if [ ! -e "$LIBKRUN" ]; then
-  echo "libkrun not found at ${LIBKRUN}; set OPENSHELL_VM_RUNTIME_SOURCE_DIR" >&2
-  exit 1
+  BREW_PREFIX="${BREW_PREFIX:-$(brew --prefix 2>/dev/null || true)}"
+  if [ -n "$BREW_PREFIX" ] && [ -e "${BREW_PREFIX}/lib/libkrun.dylib" ]; then
+    LIBKRUN="${BREW_PREFIX}/lib/libkrun.dylib"
+    echo "using Homebrew libkrun at ${LIBKRUN}"
+  else
+    echo "libkrun not found at ${LIB_DIR}/libkrun.dylib or Homebrew; install libkrun or set OPENSHELL_VM_RUNTIME_SOURCE_DIR" >&2
+    exit 1
+  fi
 fi
 
 KRUNFW_FILES=()

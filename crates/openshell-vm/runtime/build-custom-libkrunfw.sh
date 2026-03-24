@@ -152,6 +152,13 @@ REQUIRED=(
     CONFIG_IP_NF_IPTABLES
     CONFIG_IP_NF_FILTER
     CONFIG_IP_NF_NAT
+    CONFIG_NF_TABLES
+    CONFIG_NFT_NUMGEN
+    CONFIG_NFT_FIB_IPV4
+    CONFIG_NFT_FIB_IPV6
+    CONFIG_NFT_CT
+    CONFIG_NFT_NAT
+    CONFIG_NFT_MASQ
     CONFIG_VETH
     CONFIG_NET_NS
 )
@@ -195,103 +202,75 @@ fi
 echo "  Kernel source dir: ${KERNEL_DIR_NAME}"
 
 if [ "$(uname -s)" = "Darwin" ]; then
-    # On macOS, the entire kernel build (extract, patch, config, compile)
-    # must happen inside a Linux container since the kernel build system
-    # requires a Linux toolchain. We mount the checkout, inject the
-    # config fragment, and produce kernel.c inside the container.
+    # On macOS, use krunvm to build the kernel inside a lightweight Linux VM.
+    # This matches the upstream libkrunfw build approach and avoids all the
+    # issues with Docker emulation and APFS filesystem limitations.
+    #
+    # Prerequisites: brew tap slp/krun && brew install krunvm
 
-    if ! command -v docker &>/dev/null; then
-        echo "ERROR: docker is required to build the kernel on macOS" >&2
+    if ! command -v krunvm &>/dev/null; then
+        echo "ERROR: krunvm is required to build the kernel on macOS" >&2
+        echo "  Install with: brew tap slp/krun && brew install krunvm" >&2
         exit 1
     fi
 
-    echo "==> Building kernel inside Docker (macOS detected)..."
+    echo "==> Building kernel inside krunvm (macOS detected)..."
 
-    # Pre-build a Docker image with all build dependencies so the
-    # (potentially emulated) apt-get/pip work is cached across runs.
-    BUILDER_IMAGE="libkrunfw-builder:bookworm"
-    if ! docker image inspect "${BUILDER_IMAGE}" >/dev/null 2>&1; then
-        echo "  Building Docker toolchain image (first time only)..."
-        docker build --platform linux/arm64 -t "${BUILDER_IMAGE}" - <<'DOCKERFILE'
-FROM debian:bookworm-slim
-RUN apt-get update -qq && \
-    apt-get install -y -qq make gcc bc flex bison libelf-dev python3 \
-        coreutils curl xz-utils patch libssl-dev cpio >/dev/null 2>&1 && \
-    rm -rf /var/lib/apt/lists/*
-DOCKERFILE
+    VM_NAME="libkrunfw-openshell"
+
+    # Clean up any leftover VM from a previous failed run
+    krunvm delete "${VM_NAME}" 2>/dev/null || true
+
+    # Copy the config fragment into the libkrunfw tree so the VM can see it.
+    # The merge hook (MERGE_HOOK) is already written there by the cat above.
+    cp -f "${KERNEL_CONFIG_FRAGMENT}" "${LIBKRUNFW_DIR}/openshell-bridge-cni.config"
+
+    echo "  Creating VM..."
+    # krunvm may print "The volume has been configured" on first use of a
+    # volume path and exit non-zero. Retry once if that happens.
+    if ! krunvm create fedora \
+        --name "${VM_NAME}" \
+        --cpus 4 \
+        --mem 4096 \
+        -v "${LIBKRUNFW_DIR}:/work" \
+        -w /work; then
+        echo "  Retrying VM creation..."
+        krunvm create fedora \
+            --name "${VM_NAME}" \
+            --cpus 4 \
+            --mem 4096 \
+            -v "${LIBKRUNFW_DIR}:/work" \
+            -w /work
     fi
 
-    # Stage only the files the build needs into a temp dir so we
-    # avoid copying the enormous kernel source tree over virtiofs.
-    DOCKER_STAGE=$(mktemp -d)
-    trap 'rm -rf "${DOCKER_STAGE}"' EXIT
+    echo "  Installing build dependencies..."
+    krunvm start "${VM_NAME}" /usr/bin/dnf -- install -y \
+        'dnf-command(builddep)' python3-pyelftools
 
-    echo "  Staging build inputs..."
-    cp "${LIBKRUNFW_DIR}/Makefile" "${DOCKER_STAGE}/"
-    cp "${LIBKRUNFW_DIR}/bin2cbundle.py" "${DOCKER_STAGE}/"
-    # Copy base kernel config(s) and patches
-    for f in "${LIBKRUNFW_DIR}"/config-libkrunfw*; do
-        [ -f "$f" ] && cp "$f" "${DOCKER_STAGE}/"
-    done
-    if [ -d "${LIBKRUNFW_DIR}/patches" ]; then
-        cp -r "${LIBKRUNFW_DIR}/patches" "${DOCKER_STAGE}/patches"
-    fi
-    if [ -d "${LIBKRUNFW_DIR}/patches-tee" ]; then
-        cp -r "${LIBKRUNFW_DIR}/patches-tee" "${DOCKER_STAGE}/patches-tee"
-    fi
-    # Copy the cached tarball if present so we don't re-download
-    if [ -d "${LIBKRUNFW_DIR}/tarballs" ]; then
-        cp -r "${LIBKRUNFW_DIR}/tarballs" "${DOCKER_STAGE}/tarballs"
-    fi
+    krunvm start "${VM_NAME}" /usr/bin/dnf -- builddep -y kernel
 
-    docker run --rm \
-        -v "${DOCKER_STAGE}:/work" \
-        -v "${KERNEL_CONFIG_FRAGMENT}:/fragment/bridge-cni.config:ro" \
-        -v "${MERGE_HOOK}:/fragment/merge-hook.sh:ro" \
-        -w /build \
-        --platform linux/arm64 \
-        "${BUILDER_IMAGE}" \
-        bash -c '
-            set -euo pipefail
+    # Step 1: prepare kernel sources (download, extract, patch, base config)
+    echo "  Preparing kernel sources..."
+    krunvm start "${VM_NAME}" /usr/bin/make -- "${KERNEL_DIR_NAME}"
 
-            KDIR="'"${KERNEL_DIR_NAME}"'"
+    # Step 2: merge the OpenShell config fragment
+    echo "  Merging OpenShell kernel config fragment..."
+    krunvm start "${VM_NAME}" /usr/bin/bash -- \
+        /work/openshell-kconfig-hook.sh "/work/${KERNEL_DIR_NAME}" /work/openshell-bridge-cni.config
 
-            # Copy staged inputs to container-local filesystem so tar
-            # extraction does not hit macOS APFS bind-mount limitations.
-            echo "  Copying build inputs to container filesystem..."
-            cp -r /work/* /build/
+    # Step 3: build the kernel and generate the C bundle
+    echo "  Building kernel (this is the slow part)..."
+    krunvm start "${VM_NAME}" /usr/bin/make -- -j4
 
-            # Patch bin2cbundle.py to make the elftools import lazy.
-            # We only use -t Image (raw path) which does not need elftools,
-            # but the top-level import would fail without pyelftools installed.
-            sed -i "s/^from elftools/# lazy: from elftools/" bin2cbundle.py
+    echo "  Cleaning up VM..."
+    krunvm delete "${VM_NAME}"
 
-            # Step 1: prepare kernel sources (download, extract, patch, base config, olddefconfig)
-            echo "  Preparing kernel sources..."
-            make "$KDIR"
+    # Clean up temp files from the libkrunfw tree
+    rm -f "${LIBKRUNFW_DIR}/openshell-bridge-cni.config"
 
-            # Step 2: merge the OpenShell config fragment
-            echo "  Merging OpenShell kernel config fragment..."
-            bash /fragment/merge-hook.sh "/build/$KDIR" /fragment/bridge-cni.config
-
-            # Step 3: build the kernel and generate the C bundle
-            echo "  Building kernel (this is the slow part)..."
-            make -j"$(nproc)" "$KDIR"/arch/arm64/boot/Image
-
-            echo "  Generating kernel.c bundle..."
-            python3 bin2cbundle.py -t Image "$KDIR"/arch/arm64/boot/Image kernel.c
-
-            # Copy artifacts back to the bind-mounted staging dir
-            echo "  Copying artifacts back to host..."
-            cp /build/kernel.c /work/kernel.c
-            cp /build/"$KDIR"/.config /work/kernel.config
-        '
-
-    # Move artifacts from staging dir to the libkrunfw checkout
-    cp "${DOCKER_STAGE}/kernel.c" "${LIBKRUNFW_DIR}/kernel.c"
-    if [ -f "${DOCKER_STAGE}/kernel.config" ]; then
-        mkdir -p "${LIBKRUNFW_DIR}/${KERNEL_DIR_NAME}"
-        cp "${DOCKER_STAGE}/kernel.config" "${LIBKRUNFW_DIR}/${KERNEL_DIR_NAME}/.config"
+    if [ ! -f "${LIBKRUNFW_DIR}/kernel.c" ]; then
+        echo "ERROR: kernel.c was not produced — build failed" >&2
+        exit 1
     fi
 
     # Compile the shared library on the host (uses host cc for a .dylib)

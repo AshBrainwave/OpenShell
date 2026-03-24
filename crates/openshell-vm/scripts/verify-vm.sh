@@ -157,24 +157,18 @@ check "kubernetes service has ClusterIP" "networking" \
     "kubectl get svc kubernetes -o jsonpath='{.spec.clusterIP}' | grep -q ."
 
 # Check if bridge CNI is in use (cni0 bridge exists)
-CNI_PROFILE="unknown"
 if kubectl exec -n openshell openshell-0 -- ip link show cni0 >/dev/null 2>&1; then
-    CNI_PROFILE="bridge"
+    echo "  CNI profile detected: bridge"
 else
-    CNI_PROFILE="legacy-vm-net"
+    echo "  WARNING: cni0 bridge not detected — bridge CNI may not be running yet"
 fi
-echo "  CNI profile detected: ${CNI_PROFILE}"
 
-if [ "$CNI_PROFILE" = "bridge" ]; then
-    check "cni0 bridge exists in pod" "networking" \
-        "kubectl exec -n openshell openshell-0 -- ip link show cni0 2>/dev/null"
+check "cni0 bridge exists in pod" "networking" \
+    "kubectl exec -n openshell openshell-0 -- ip link show cni0 2>/dev/null"
 
-    # With bridge CNI, kubernetes.default.svc should be reachable.
-    check "kubernetes.default.svc reachable from pod" "networking" \
-        "kubectl exec -n openshell openshell-0 -- wget -q -O /dev/null --timeout=5 https://kubernetes.default.svc/healthz 2>/dev/null || kubectl exec -n openshell openshell-0 -- curl -sk --connect-timeout 5 https://kubernetes.default.svc/healthz 2>/dev/null"
-else
-    echo "  (skipping bridge-specific checks for legacy-vm-net profile)"
-fi
+# With bridge CNI, kubernetes.default.svc should be reachable.
+check "kubernetes.default.svc reachable from pod" "networking" \
+    "kubectl exec -n openshell openshell-0 -- wget -q -O /dev/null --timeout=5 https://kubernetes.default.svc/healthz 2>/dev/null || kubectl exec -n openshell openshell-0 -- curl -sk --connect-timeout 5 https://kubernetes.default.svc/healthz 2>/dev/null"
 
 check "no bridge creation errors in events" "networking" \
     "! kubectl get events -A 2>/dev/null | grep -qi 'bridge.*fail\\|cni0.*error\\|FailedCreatePodSandBox.*bridge'"
@@ -184,9 +178,6 @@ echo ""
 # ── Host Port Connectivity ─────────────────────────────────────────────
 
 echo "[Host Connectivity]"
-
-check "port 6443 (kube-apiserver) reachable" "host" \
-    "timeout 5 bash -c 'echo > /dev/tcp/127.0.0.1/6443' 2>/dev/null || nc -z -w5 127.0.0.1 6443 2>/dev/null"
 
 check "port 30051 (gateway service) reachable" "host" \
     "timeout 5 bash -c 'echo > /dev/tcp/127.0.0.1/30051' 2>/dev/null || nc -z -w5 127.0.0.1 30051 2>/dev/null"
