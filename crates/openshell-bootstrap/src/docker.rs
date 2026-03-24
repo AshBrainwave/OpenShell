@@ -559,6 +559,19 @@ pub async fn ensure_container(
         }]);
     }
 
+    // On Tegra platforms the nvidia runtime or CDI spec generation reads
+    // host-file injection config from
+    // /etc/nvidia-container-runtime/host-files-for-container.d on the host.
+    // Bind-mount that directory (read-only) into the gateway so the same
+    // nvidia runtime or CDI spec generation running inside k3s (for sandbox
+    // pods) can apply the same config.
+    const HOST_FILES_DIR: &str = "/etc/nvidia-container-runtime/host-files-for-container.d";
+    if std::path::Path::new(HOST_FILES_DIR).is_dir() {
+        let mut binds = host_config.binds.take().unwrap_or_default();
+        binds.push(format!("{HOST_FILES_DIR}:{HOST_FILES_DIR}:ro"));
+        host_config.binds = Some(binds);
+    }
+
     let mut cmd = vec![
         "server".to_string(),
         "--disable=traefik".to_string(),
