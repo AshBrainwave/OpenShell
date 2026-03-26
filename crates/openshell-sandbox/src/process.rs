@@ -559,10 +559,31 @@ mod tests {
     }
 
     #[test]
+    fn drop_privileges_succeeds_for_current_group() {
+        // Set only run_as_group (no run_as_user) so that initgroups() is not
+        // called.  initgroups(3) requires CAP_SETGID/root even when the target
+        // is the current user, so it cannot be exercised without elevated
+        // privileges.  This test covers the setgid() + GID post-condition
+        // verification path without needing root.
+        let current_group = Group::from_gid(nix::unistd::getegid())
+            .expect("getgrgid")
+            .expect("current group entry");
+
+        let policy = policy_with_process(ProcessPolicy {
+            run_as_user: None,
+            run_as_group: Some(current_group.name),
+        });
+
+        assert!(drop_privileges(&policy).is_ok());
+    }
+
+    #[test]
+    #[ignore = "initgroups(3) requires CAP_SETGID; run as root: sudo cargo test -- --ignored"]
     fn drop_privileges_succeeds_for_current_user() {
-        // Resolve the current user's name so we can ask drop_privileges to
-        // "switch" to the user we're already running as.  This exercises the
-        // full verification path (getegid/geteuid checks) without needing root.
+        // Exercises the full privilege-drop path including initgroups(),
+        // setgid(), setuid(), and the root-reacquisition check.  Requires
+        // CAP_SETGID (root) because initgroups(3) calls setgroups(2)
+        // internally.  Fixes: https://github.com/NVIDIA/OpenShell/issues/622
         let current_user = User::from_uid(nix::unistd::geteuid())
             .expect("getpwuid")
             .expect("current user entry");
