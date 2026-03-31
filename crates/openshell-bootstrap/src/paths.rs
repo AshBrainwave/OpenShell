@@ -28,12 +28,24 @@ pub fn last_sandbox_path(gateway: &str) -> Result<PathBuf> {
 
 /// Default rootfs directory for gateway microVMs.
 ///
-/// Location: `$XDG_DATA_HOME/openshell/openshell-vm/rootfs`
+/// Location: `$XDG_DATA_HOME/openshell/openshell-vm/{version}/rootfs`
+///
+/// The version is taken from the CARGO_PKG_VERSION at build time, allowing
+/// multiple versions to coexist and enabling clean upgrades.
 pub fn default_rootfs_dir() -> Result<PathBuf> {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
     Ok(xdg_data_dir()?
         .join("openshell")
         .join("openshell-vm")
+        .join(VERSION)
         .join("rootfs"))
+}
+
+/// Base directory for openshell-vm data (without version).
+///
+/// Location: `$XDG_DATA_HOME/openshell/openshell-vm/`
+pub fn openshell_vm_base_dir() -> Result<PathBuf> {
+    Ok(xdg_data_dir()?.join("openshell").join("openshell-vm"))
 }
 
 #[cfg(test)]

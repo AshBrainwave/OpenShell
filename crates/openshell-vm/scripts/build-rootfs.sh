@@ -19,6 +19,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source pinned dependency versions (digests, checksums, commit SHAs).
+# Environment variables override pins — see pins.env for details.
+PINS_FILE="${SCRIPT_DIR}/../pins.env"
+if [ -f "$PINS_FILE" ]; then
+    # shellcheck source=../pins.env
+    source "$PINS_FILE"
+fi
 DEFAULT_ROOTFS="${XDG_DATA_HOME:-${HOME}/.local/share}/openshell/openshell-vm/rootfs"
 ROOTFS_DIR="${1:-${DEFAULT_ROOTFS}}"
 CONTAINER_NAME="krun-rootfs-builder"
@@ -34,11 +42,11 @@ K3S_VERSION="${K3S_VERSION//-k3s/+k3s}"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 # Container images to pre-load into k3s (arm64).
+# AGENT_SANDBOX_IMAGE and COMMUNITY_SANDBOX_IMAGE are digest-pinned in pins.env.
+# SERVER_IMAGE is intentionally unpinned (local dev artifact).
 IMAGE_REPO_BASE="${IMAGE_REPO_BASE:-openshell}"
 IMAGE_TAG="${IMAGE_TAG:-dev}"
 SERVER_IMAGE="${IMAGE_REPO_BASE}/gateway:${IMAGE_TAG}"
-AGENT_SANDBOX_IMAGE="registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.1.0"
-COMMUNITY_SANDBOX_IMAGE="ghcr.io/nvidia/openshell-community/sandboxes/base:latest"
 
 echo "==> Building openshell-vm rootfs"
 echo "    k3s version: ${K3S_VERSION}"
@@ -117,6 +125,14 @@ else
     chmod +x "${K3S_BIN}"
 fi
 
+# Verify k3s binary integrity.
+if [ -n "${K3S_ARM64_SHA256:-}" ]; then
+    echo "==> Verifying k3s binary checksum..."
+    echo "${K3S_ARM64_SHA256}  ${K3S_BIN}" | shasum -a 256 -c -
+else
+    echo "WARNING: K3S_ARM64_SHA256 not set, skipping checksum verification"
+fi
+
 # ── Build base image with dependencies ─────────────────────────────────
 
 # Clean up any previous run
@@ -124,8 +140,10 @@ docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
 docker rm -f "${INIT_CONTAINER_NAME}" 2>/dev/null || true
 
 echo "==> Building base image..."
-docker build --platform linux/arm64 -t "${BASE_IMAGE_TAG}" -f - . <<'DOCKERFILE'
-FROM nvcr.io/nvidia/base/ubuntu:noble-20251013
+docker build --platform linux/arm64 -t "${BASE_IMAGE_TAG}" \
+    --build-arg "BASE_IMAGE=${VM_BASE_IMAGE}" -f - . <<'DOCKERFILE'
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \

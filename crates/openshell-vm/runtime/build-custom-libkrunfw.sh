@@ -26,9 +26,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-KERNEL_CONFIG_FRAGMENT="${SCRIPT_DIR}/kernel/bridge-cni.config"
+KERNEL_CONFIG_FRAGMENT="${SCRIPT_DIR}/kernel/openshell.kconfig"
 
-# Defaults
+# Source pinned dependency versions (digests, checksums, commit SHAs).
+# Environment variables override pins — see pins.env for details.
+PINS_FILE="${SCRIPT_DIR}/../pins.env"
+if [ -f "$PINS_FILE" ]; then
+    # shellcheck source=../pins.env
+    source "$PINS_FILE"
+fi
+
+# Defaults (LIBKRUNFW_REF is commit-pinned in pins.env; falls back to main
+# only if pins.env is missing and no env var is set).
 LIBKRUNFW_REPO="${LIBKRUNFW_REPO:-https://github.com/containers/libkrunfw.git}"
 LIBKRUNFW_REF="${LIBKRUNFW_REF:-main}"
 OUTPUT_DIR="${OPENSHELL_RUNTIME_OUTPUT_DIR:-${PROJECT_ROOT}/target/custom-runtime}"
@@ -223,7 +232,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
 
     # Copy the config fragment into the libkrunfw tree so the VM can see it.
     # The merge hook (MERGE_HOOK) is already written there by the cat above.
-    cp -f "${KERNEL_CONFIG_FRAGMENT}" "${LIBKRUNFW_DIR}/openshell-bridge-cni.config"
+    cp -f "${KERNEL_CONFIG_FRAGMENT}" "${LIBKRUNFW_DIR}/openshell.kconfig"
 
     echo "  Creating VM..."
     # krunvm may print "The volume has been configured" on first use of a
@@ -256,7 +265,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     # Step 2: merge the OpenShell config fragment
     echo "  Merging OpenShell kernel config fragment..."
     krunvm start "${VM_NAME}" /usr/bin/bash -- \
-        /work/openshell-kconfig-hook.sh "/work/${KERNEL_DIR_NAME}" /work/openshell-bridge-cni.config
+        /work/openshell-kconfig-hook.sh "/work/${KERNEL_DIR_NAME}" /work/openshell.kconfig
 
     # Step 3: build the kernel and generate the C bundle
     echo "  Building kernel (this is the slow part)..."
@@ -266,7 +275,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     krunvm delete "${VM_NAME}"
 
     # Clean up temp files from the libkrunfw tree
-    rm -f "${LIBKRUNFW_DIR}/openshell-bridge-cni.config"
+    rm -f "${LIBKRUNFW_DIR}/openshell.kconfig"
 
     if [ ! -f "${LIBKRUNFW_DIR}/kernel.c" ]; then
         echo "ERROR: kernel.c was not produced — build failed" >&2
@@ -352,7 +361,7 @@ if [ -n "$KERNEL_SRC_DIR" ] && [ -f "${KERNEL_SRC_DIR}/.config" ]; then
 fi
 
 # Copy our fragment for reference
-cp "${KERNEL_CONFIG_FRAGMENT}" "${OUTPUT_DIR}/bridge-cni.config"
+cp "${KERNEL_CONFIG_FRAGMENT}" "${OUTPUT_DIR}/openshell.kconfig"
 
 # ── Write provenance metadata ──────────────────────────────────────────
 
@@ -365,7 +374,7 @@ cat > "${OUTPUT_DIR}/provenance.json" << EOF
   "libkrunfw_ref": "${LIBKRUNFW_REF}",
   "libkrunfw_commit": "${LIBKRUNFW_COMMIT}",
   "kernel_version": "${KERNEL_VERSION:-unknown}",
-  "kernel_config_fragment": "bridge-cni.config",
+  "kernel_config_fragment": "openshell.kconfig",
   "artifact_sha256": "${ARTIFACT_HASH}",
   "host_os": "$(uname -s)",
   "host_arch": "$(uname -m)",

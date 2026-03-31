@@ -1,5 +1,7 @@
 # Custom libkrunfw VM Runtime
 
+> Status: Experimental and work in progress (WIP). VM support is under active development and may change.
+
 ## Overview
 
 The OpenShell gateway VM uses [libkrun](https://github.com/containers/libkrun) to boot a
@@ -17,16 +19,13 @@ the VM kernel, enabling standard Kubernetes networking.
 ```
 Host (macOS/Linux)
 ├── openshell-vm binary
-│   ├── Loads libkrun.dylib (VMM)
-│   ├── Preloads libkrunfw.dylib (kernel)
+│   ├── Embedded runtime (zstd-compressed)
+│   │   ├── libkrun.{dylib,so}
+│   │   ├── libkrunfw.{dylib,so} (kernel)
+│   │   └── gvproxy
+│   ├── Extracts to ~/.local/share/openshell/vm-runtime/{version}/
 │   └── Logs runtime provenance
-├── openshell-vm.runtime/ (sidecar bundle)
-│   ├── libkrun.dylib
-│   ├── libkrunfw.dylib (stock or custom)
-│   ├── gvproxy
-│   ├── manifest.json
-│   └── provenance.json (custom only)
-└── gvproxy (networking)
+└── gvproxy (networking proxy)
 
 Guest VM
 ├── openshell-vm-init.sh (PID 1)
@@ -36,6 +35,44 @@ Guest VM
 │   └── Execs k3s server
 ├── openshell-vm-exec-agent.py (guest exec agent)
 └── check-vm-capabilities.sh (diagnostics)
+```
+
+## Embedded Runtime
+
+The openshell-vm binary is fully self-contained, embedding both the VM runtime libraries
+and a minimal rootfs as zstd-compressed byte arrays. On first use, the binary extracts
+these to XDG cache directories with progress bars:
+
+```
+~/.local/share/openshell/vm-runtime/{version}/
+├── libkrun.{dylib,so}
+├── libkrunfw.{5.dylib,.so.5}
+└── gvproxy
+
+~/.local/share/openshell/openshell-vm/{version}/rootfs/
+├── usr/local/bin/k3s
+├── opt/openshell/bin/openshell-sandbox
+├── opt/openshell/manifests/
+└── ...
+```
+
+This eliminates the need for separate bundles or downloads - a single ~120MB binary
+provides everything needed to run the VM. Old cache versions are automatically
+cleaned up when a new version is extracted.
+
+### Hybrid Approach
+
+The embedded rootfs uses a "minimal" configuration:
+- Includes: Base Ubuntu, k3s binary, supervisor binary, helm charts, manifests
+- Excludes: Pre-loaded container images (~1GB savings)
+
+Container images are pulled on demand when sandboxes are created. First boot takes
+~30-60s as k3s initializes; subsequent boots use cached state for ~3-5s startup.
+
+For fully air-gapped environments requiring pre-loaded images, build with:
+```bash
+mise run vm:build:rootfs-tarball   # Full rootfs (~2GB, includes images)
+mise run vm:build:embedded:quick   # Rebuild binary with full rootfs
 ```
 
 ## Network Profile
@@ -69,19 +106,19 @@ and makes it straightforward to correlate VM behavior with a specific runtime ar
 crates/openshell-vm/runtime/
 ├── build-custom-libkrunfw.sh      # Clones libkrunfw, applies config, builds
 ├── kernel/
-│   └── bridge-cni.config          # Kernel config fragment
+│   └── openshell.kconfig          # Kernel config fragment
 └── README.md                      # Operator documentation
 
 Output: target/custom-runtime/
 ├── libkrunfw.dylib                # Custom library
 ├── provenance.json                # Build metadata
-├── bridge-cni.config              # Config fragment used
+├── openshell.kconfig              # Config fragment used
 └── kernel.config                  # Full kernel .config
 ```
 
 ## Kernel Config Fragment
 
-The `bridge-cni.config` fragment enables these kernel features on top of the stock
+The `openshell.kconfig` fragment enables these kernel features on top of the stock
 libkrunfw kernel:
 
 | Feature | Config | Purpose |
@@ -118,23 +155,51 @@ The standalone `openshell-vm` binary supports `openshell-vm exec -- <command...>
 `openshell-vm exec` also injects `KUBECONFIG=/etc/rancher/k3s/k3s.yaml` by default so kubectl-style
 commands work the same way they would inside the VM shell.
 
+## Build Commands
+
+```bash
+# Build embedded binary with minimal rootfs (~120MB, recommended)
+mise run vm:build:rootfs-tarball:minimal  # Build minimal rootfs tarball
+mise run vm:build:embedded                 # Build binary with embedded rootfs
+
+# Quick rebuild (uses cached artifacts, skips rootfs rebuild)
+mise run vm:build:embedded:quick
+
+# Build with full rootfs (air-gapped, ~2GB+)
+mise run vm:build:rootfs-tarball          # Build full rootfs tarball
+mise run vm:build:embedded:quick          # Rebuild binary
+
+# With custom kernel (optional, adds ~20 min)
+mise run vm:runtime:build-libkrunfw       # Build custom libkrunfw
+mise run vm:build:embedded                # Then build embedded binary
+
+# For Linux (first time only)
+mise run vm:runtime:build-libkrun         # Build libkrun/libkrunfw from source
+mise run vm:build:embedded                # Then build embedded binary
+```
+
 ## Rollout Strategy
 
-1. Custom runtime support is opt-in via `OPENSHELL_VM_RUNTIME_SOURCE_DIR`.
+1. Custom runtime is embedded by default when building with `mise run vm:build:embedded`.
 2. The init script validates kernel capabilities at boot and fails fast if missing.
-3. Rollback: unset the env var and re-bundle with stock libraries (note: stock
-   libraries lack bridge/netfilter and pod networking will not work).
+3. For development, override with `OPENSHELL_VM_RUNTIME_DIR` to use a local directory.
 
 ## Related Files
 
 | File | Purpose |
 |------|---------|
+| `crates/openshell-vm/src/embedded.rs` | Embedded resource extraction and caching |
 | `crates/openshell-vm/src/ffi.rs` | Runtime loading, provenance capture |
 | `crates/openshell-vm/src/lib.rs` | VM launch, provenance logging |
 | `crates/openshell-vm/src/exec.rs` | Runtime state tracking and host-side exec transport |
+| `crates/openshell-vm/build.rs` | Build script for embedding compressed artifacts |
 | `crates/openshell-vm/scripts/openshell-vm-init.sh` | Guest init, network profile selection |
 | `crates/openshell-vm/scripts/openshell-vm-exec-agent.py` | Guest-side exec agent |
 | `crates/openshell-vm/scripts/check-vm-capabilities.sh` | Kernel capability checker |
 | `crates/openshell-vm/runtime/` | Build pipeline and kernel config |
-| `tasks/scripts/bundle-vm-runtime.sh` | Runtime bundling (stock + custom) |
+| `tasks/scripts/compress-vm-runtime.sh` | Gather and compress runtime artifacts |
+| `tasks/scripts/build-rootfs-tarball.sh` | Build and compress rootfs tarball |
+| `tasks/scripts/build-libkrun.sh` | Build libkrun from source (Linux) |
+| `crates/openshell-vm/scripts/build-rootfs.sh` | Build full rootfs with pre-loaded images |
+| `crates/openshell-vm/scripts/build-rootfs-minimal.sh` | Build minimal rootfs without images |
 | `tasks/vm.toml` | Mise task definitions |

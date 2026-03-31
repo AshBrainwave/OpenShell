@@ -3,12 +3,14 @@
 
 # openshell-vm development helpers
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Main VM Commands
+# ═══════════════════════════════════════════════════════════════════════════
+
 [vm]
 description = "Build and run the standalone openshell-vm microVM"
 run = [
-  "mise run vm:build:binary",
-  "tasks/scripts/codesign-openshell-vm.sh",
-  "tasks/scripts/bundle-vm-runtime.sh",
+  "mise run vm:build:embedded",
   "tasks/scripts/ensure-vm-rootfs.sh",
   "tasks/scripts/sync-vm-rootfs.sh",
   "tasks/scripts/run-vm.sh",
@@ -18,28 +20,81 @@ hide = false
 ["vm:build"]
 description = "Force a fresh openshell-vm rebuild, including the rootfs"
 run = [
-  "mise run vm:build:binary",
-  "tasks/scripts/codesign-openshell-vm.sh",
-  "tasks/scripts/bundle-vm-runtime.sh",
+  "mise run vm:build:embedded",
   "OPENSHELL_VM_FORCE_ROOTFS_REBUILD=1 tasks/scripts/ensure-vm-rootfs.sh",
   "tasks/scripts/sync-vm-rootfs.sh",
 ]
 hide = false
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Embedded Binary Build (Single Binary, No Sidecar)
+# ═══════════════════════════════════════════════════════════════════════════
+
+["vm:build:embedded"]
+description = "Build openshell-vm with embedded runtime (single binary, no sidecar)"
+run = [
+  "mise run vm:runtime:compress",
+  "OPENSHELL_VM_RUNTIME_COMPRESSED_DIR=$PWD/target/vm-runtime-compressed cargo build -p openshell-vm",
+  "tasks/scripts/codesign-openshell-vm.sh",
+]
+hide = false
+
 ["vm:build:binary"]
-description = "Build the standalone openshell-vm binary"
-run = "cargo build -p openshell-vm"
+description = "Build the standalone openshell-vm binary (requires vm:runtime:compress first)"
+run = "OPENSHELL_VM_RUNTIME_COMPRESSED_DIR=$PWD/target/vm-runtime-compressed cargo build -p openshell-vm"
 hide = true
 
-["vm:build:release"]
-description = "Build the standalone openshell-vm binary in release mode"
-run = "cargo build -p openshell-vm --release"
-hide = true
+# ═══════════════════════════════════════════════════════════════════════════
+# VM Runtime Artifact Management
+# ═══════════════════════════════════════════════════════════════════════════
+
+["vm:runtime:compress"]
+description = "Gather and compress VM runtime artifacts for embedding"
+run = "tasks/scripts/compress-vm-runtime.sh"
+hide = false
+
+["vm:runtime:build-libkrunfw"]
+description = "Build custom libkrunfw with bridge/netfilter kernel support"
+run = "crates/openshell-vm/runtime/build-custom-libkrunfw.sh"
+hide = false
+
+["vm:runtime:build-libkrun"]
+description = "Build libkrun and libkrunfw from source (Linux only)"
+run = "tasks/scripts/build-libkrun.sh"
+hide = false
+
+["vm:runtime:build-libkrun-macos"]
+description = "Build portable libkrun from source (macOS, no GPU deps)"
+run = "tasks/scripts/build-libkrun-macos.sh"
+hide = false
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Rootfs Management
+# ═══════════════════════════════════════════════════════════════════════════
 
 ["vm:rootfs"]
 description = "Build the default openshell-vm rootfs if needed"
 run = "tasks/scripts/ensure-vm-rootfs.sh"
 hide = true
+
+["vm:build:rootfs-tarball"]
+description = "Build and compress FULL rootfs tarball for embedding (~2GB+)"
+run = "tasks/scripts/build-rootfs-tarball.sh"
+hide = false
+
+["vm:build:rootfs-tarball:minimal"]
+description = "Build and compress MINIMAL rootfs tarball for embedding (~200-300MB)"
+run = "tasks/scripts/build-rootfs-tarball.sh --minimal"
+hide = false
+
+["vm:build:embedded:quick"]
+description = "Build embedded binary using cached rootfs tarball (skips rootfs rebuild)"
+run = [
+  "mise run vm:runtime:compress",
+  "OPENSHELL_VM_RUNTIME_COMPRESSED_DIR=$PWD/target/vm-runtime-compressed cargo build -p openshell-vm",
+  "tasks/scripts/codesign-openshell-vm.sh",
+]
+hide = false
 
 ["vm:codesign"]
 description = "Codesign the openshell-vm binary for Hypervisor.framework access on macOS"
@@ -47,23 +102,7 @@ depends = ["vm:build:binary"]
 run = "tasks/scripts/codesign-openshell-vm.sh"
 hide = true
 
-["vm:bundle-runtime"]
-description = "Stage the openshell-vm sidecar runtime bundle next to local build outputs"
-run = "tasks/scripts/bundle-vm-runtime.sh"
-hide = false
-
-["vm:build-custom-runtime"]
-description = "Build a custom libkrunfw with bridge/netfilter kernel support"
-run = "crates/openshell-vm/runtime/build-custom-libkrunfw.sh"
-hide = false
-
 ["vm:check-capabilities"]
 description = "Check VM kernel capabilities (run inside the VM)"
 run = "echo 'This script must be run inside the VM. Copy it to the rootfs or exec into a running VM.'"
-hide = false
-
-["vm:package:openshell-vm"]
-description = "Package the openshell-vm binary with its sidecar runtime bundle"
-run = "tasks/scripts/package-openshell-vm-runtime.sh"
-depends = ["vm:build:release", "vm:bundle-runtime"]
 hide = false

@@ -14,8 +14,10 @@
 
 #![allow(unsafe_code)]
 
+mod embedded;
 mod exec;
 mod ffi;
+mod health;
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
@@ -23,9 +25,9 @@ use std::ptr;
 use std::time::Instant;
 
 pub use exec::{
-    acquire_rootfs_lock, clear_vm_runtime_state, ensure_vm_not_running, exec_running_vm,
-    reset_runtime_state, vm_exec_socket_path, vm_state_path, write_vm_runtime_state, VmExecOptions,
-    VmRuntimeState, VM_EXEC_VSOCK_PORT,
+    VM_EXEC_VSOCK_PORT, VmExecOptions, VmRuntimeState, acquire_rootfs_lock, clear_vm_runtime_state,
+    ensure_vm_not_running, exec_running_vm, reset_runtime_state, vm_exec_socket_path,
+    vm_state_path, write_vm_runtime_state,
 };
 
 // ── Error type ─────────────────────────────────────────────────────────
@@ -336,30 +338,29 @@ fn c_string_array(strings: &[&str]) -> Result<(Vec<CString>, Vec<*const libc::c_
     Ok((owned, ptrs))
 }
 
-const VM_RUNTIME_DIR_NAME: &str = "openshell-vm.runtime";
 const VM_RUNTIME_DIR_ENV: &str = "OPENSHELL_VM_RUNTIME_DIR";
 
 pub(crate) fn configured_runtime_dir() -> Result<PathBuf, VmError> {
+    // Allow override for development
     if let Some(path) = std::env::var_os(VM_RUNTIME_DIR_ENV) {
-        return Ok(PathBuf::from(path));
+        let path = PathBuf::from(path);
+        tracing::debug!(
+            path = %path.display(),
+            "Using runtime from OPENSHELL_VM_RUNTIME_DIR"
+        );
+        return Ok(path);
     }
 
-    let exe = std::env::current_exe().map_err(|e| VmError::HostSetup(e.to_string()))?;
-    let exe_dir = exe.parent().ok_or_else(|| {
-        VmError::HostSetup(format!(
-            "executable has no parent directory: {}",
-            exe.display()
-        ))
-    })?;
-    Ok(exe_dir.join(VM_RUNTIME_DIR_NAME))
+    // Use embedded runtime (extracts on first use)
+    embedded::ensure_runtime_extracted()
 }
 
-fn validate_runtime_dir(dir: &Path) -> Result<PathBuf, VmError> {
+fn validate_runtime_dir(dir: &Path) -> Result<(), VmError> {
     if !dir.is_dir() {
         return Err(VmError::BinaryNotFound {
             path: dir.display().to_string(),
             hint: format!(
-                "stage the VM runtime bundle with `mise run vm:bundle-runtime` or set {VM_RUNTIME_DIR_ENV}"
+                "VM runtime not found. Run `mise run vm:build:embedded` or set {VM_RUNTIME_DIR_ENV}"
             ),
         });
     }
@@ -368,7 +369,7 @@ fn validate_runtime_dir(dir: &Path) -> Result<PathBuf, VmError> {
     if !libkrun.is_file() {
         return Err(VmError::BinaryNotFound {
             path: libkrun.display().to_string(),
-            hint: "runtime bundle is incomplete: missing libkrun".to_string(),
+            hint: "runtime is incomplete: missing libkrun".to_string(),
         });
     }
 
@@ -384,7 +385,7 @@ fn validate_runtime_dir(dir: &Path) -> Result<PathBuf, VmError> {
     if !has_krunfw {
         return Err(VmError::BinaryNotFound {
             path: dir.display().to_string(),
-            hint: "runtime bundle is incomplete: missing libkrunfw".to_string(),
+            hint: "runtime is incomplete: missing libkrunfw".to_string(),
         });
     }
 
@@ -392,7 +393,7 @@ fn validate_runtime_dir(dir: &Path) -> Result<PathBuf, VmError> {
     if !gvproxy.is_file() {
         return Err(VmError::BinaryNotFound {
             path: gvproxy.display().to_string(),
-            hint: "runtime bundle is incomplete: missing gvproxy".to_string(),
+            hint: "runtime is incomplete: missing gvproxy".to_string(),
         });
     }
 
@@ -412,46 +413,27 @@ fn validate_runtime_dir(dir: &Path) -> Result<PathBuf, VmError> {
         }
     }
 
-    // Validate manifest.json if present — warn but don't fail if files
-    // listed in the manifest are missing (backwards compatibility).
-    let manifest_path = dir.join("manifest.json");
-    if manifest_path.is_file() {
-        if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
-            // Simple check: verify all listed files exist.
-            // The manifest lists files as JSON strings in a "files" array.
-            for line in contents.lines() {
-                let trimmed = line.trim().trim_matches(|c| c == '"' || c == ',');
-                if !trimmed.is_empty()
-                    && !trimmed.starts_with('{')
-                    && !trimmed.starts_with('}')
-                    && !trimmed.starts_with('[')
-                    && !trimmed.starts_with(']')
-                    && !trimmed.contains(':')
-                {
-                    let file_path = dir.join(trimmed);
-                    if !file_path.exists() {
-                        eprintln!(
-                            "warning: manifest.json references missing file: {}",
-                            trimmed
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(gvproxy)
+    Ok(())
 }
 
 fn resolve_runtime_bundle() -> Result<PathBuf, VmError> {
     let runtime_dir = configured_runtime_dir()?;
-    validate_runtime_dir(&runtime_dir)
+    // Validate the directory has required files
+    validate_runtime_dir(&runtime_dir)?;
+    Ok(runtime_dir.join("gvproxy"))
 }
 
 pub fn default_runtime_gvproxy_path() -> PathBuf {
     configured_runtime_dir()
-        .unwrap_or_else(|_| PathBuf::from(VM_RUNTIME_DIR_NAME))
+        .or_else(|_| embedded::runtime_cache_path())
+        .unwrap_or_else(|_| PathBuf::from("gvproxy"))
         .join("gvproxy")
+}
+
+/// Check if the given path matches the expected default rootfs location.
+fn is_default_rootfs_path(path: &Path) -> bool {
+    // Check if path matches the pattern: ~/.local/share/openshell/openshell-vm/.../rootfs
+    path.to_string_lossy().contains("openshell/openshell-vm") && path.ends_with("rootfs")
 }
 
 #[cfg(target_os = "macos")]
@@ -876,6 +858,13 @@ fn path_to_cstring(path: &Path) -> Result<CString, VmError> {
 /// Returns the VM exit code (from `waitpid`).
 #[allow(clippy::similar_names)]
 pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
+    // Auto-extract embedded rootfs if using default path and it doesn't exist
+    if !config.rootfs.is_dir() {
+        if is_default_rootfs_path(&config.rootfs) && embedded::has_embedded_rootfs() {
+            embedded::ensure_rootfs_extracted()?;
+        }
+    }
+
     // Validate rootfs
     if !config.rootfs.is_dir() {
         return Err(VmError::RootfsNotFound {
@@ -908,8 +897,8 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
     eprintln!("rootfs: {}", config.rootfs.display());
     eprintln!("vm: {} vCPU(s), {} MiB RAM", config.vcpus, config.mem_mib);
 
-    // The runtime must already be staged as a sidecar bundle next to the
-    // binary (or explicitly pointed to via OPENSHELL_VM_RUNTIME_DIR).
+    // The runtime is embedded in the binary and extracted on first use.
+    // Can be overridden via OPENSHELL_VM_RUNTIME_DIR for development.
     let runtime_gvproxy = resolve_runtime_bundle()?;
     let runtime_dir = runtime_gvproxy.parent().ok_or_else(|| {
         VmError::HostSetup(format!(
@@ -1209,10 +1198,12 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
                     eprintln!("  The VM is running but OpenShell may not be fully operational.");
                 }
 
-                // Wait for the gRPC service to be reachable via TCP
-                // probe on host:30051. This confirms the full path
-                // (gvproxy → kube-proxy nftables → pod:8080) is working.
-                wait_for_gateway_service(gateway_port);
+                // Wait for the gRPC health check to pass. This ensures
+                // the service is fully operational, not just accepting
+                // TCP connections. The health check confirms the full
+                // path (gvproxy → kube-proxy nftables → pod:8080) and
+                // that the gRPC service is responding to requests.
+                health::wait_for_gateway_ready(gateway_port, &config.gateway_name);
             }
 
             eprintln!("Ready [{:.1}s total]", boot_start.elapsed().as_secs_f64());
@@ -1280,8 +1271,8 @@ const DEFAULT_GATEWAY_PORT: u16 = 30051;
 ///    host.
 ///
 /// 2. **Warm boot**: host-side metadata + mTLS certs survive across VM
-///    restarts. Nothing to do — service readiness is confirmed by the TCP
-///    probe in `wait_for_gateway_service()`.
+///    restarts. Nothing to do — service readiness is confirmed by the gRPC
+///    health check in `health::wait_for_gateway_ready()`.
 ///
 /// The VM generates PKI on first boot (via openshell-vm-init.sh) and
 /// writes certs to `/opt/openshell/pki/` on the rootfs. This function:
@@ -1315,8 +1306,25 @@ fn bootstrap_gateway(rootfs: &Path, gateway_name: &str, gateway_port: u16) -> Re
         // Verify host certs match the rootfs PKI. If they diverge (e.g.
         // PKI was regenerated out-of-band, or the rootfs was replaced),
         // re-sync the host certs from the authoritative rootfs copy.
+        //
+        // Wait for the PKI to be available — the VM may be generating it
+        // at boot time (non-pre-initialized rootfs). Without this wait,
+        // the sync check runs before the VM writes its certs, causing
+        // mTLS mismatch errors on connection.
         let pki_dir = rootfs.join("opt/openshell/pki");
-        if pki_dir.join("ca.crt").is_file() {
+        let ca_cert_path = pki_dir.join("ca.crt");
+        let pki_wait_timeout = std::time::Duration::from_secs(30);
+        let pki_wait_start = Instant::now();
+        while !ca_cert_path.is_file()
+            || std::fs::metadata(&ca_cert_path).map_or(true, |m| m.len() == 0)
+        {
+            if pki_wait_start.elapsed() >= pki_wait_timeout {
+                eprintln!("Warning: PKI not available after 30s, skipping cert sync");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if ca_cert_path.is_file() {
             if let Err(e) = sync_host_certs_if_stale(&pki_dir, gateway_name) {
                 eprintln!("Warning: cert sync check failed: {e}");
             }
@@ -1486,83 +1494,6 @@ fn sync_host_certs_if_stale(pki_dir: &Path, gateway_name: &str) -> Result<(), Vm
     Ok(())
 }
 
-/// Wait for the openshell pod to become Ready inside the k3s cluster
-/// and verify the gRPC service is reachable from the host.
-///
-/// Stale pod/lease records are cleaned from the kine DB at build time
-/// (see `build-rootfs.sh`). Containerd metadata (meta.db) is preserved
-/// across boots so the native snapshotter doesn't re-extract image layers.
-/// Runtime task state is cleaned by `openshell-vm-init.sh` on each boot.
-///
-/// Wait for the OpenShell gRPC service to be reachable from the host.
-///
-/// Polls `host_tcp_probe()` on `127.0.0.1:30051` with 1s intervals.
-/// The probe confirms the full networking path: gvproxy → kube-proxy
-/// nftables → pod:8080. A successful probe means the pod is running,
-/// the NodePort service is routing, and the server is accepting
-/// connections. No kubectl or API server access required.
-fn wait_for_gateway_service(gateway_port: u16) {
-    let start = Instant::now();
-    let timeout = std::time::Duration::from_secs(90);
-    let poll_interval = std::time::Duration::from_secs(1);
-
-    eprintln!("Waiting for gateway service...");
-
-    loop {
-        if host_tcp_probe(gateway_port) {
-            eprintln!("Service healthy [{:.1}s]", start.elapsed().as_secs_f64());
-            return;
-        }
-
-        if start.elapsed() >= timeout {
-            eprintln!(
-                "  gateway service not ready after {:.0}s, continuing anyway",
-                timeout.as_secs_f64()
-            );
-            return;
-        }
-
-        std::thread::sleep(poll_interval);
-    }
-}
-
-/// Probe `127.0.0.1:30051` from the host to verify the full
-/// gvproxy → VM → pod path is working.
-///
-/// gvproxy accepts TCP connections even when the guest port is closed,
-/// but those connections are immediately reset. A server that is truly
-/// listening will hold the connection open (waiting for a TLS
-/// ClientHello). We exploit this: connect, then try a short read. If
-/// the read **times out** the server is alive; if it returns an error
-/// (reset/EOF) the server is down.
-fn host_tcp_probe(gateway_port: u16) -> bool {
-    use std::io::Read;
-    use std::net::{SocketAddr, TcpStream};
-    use std::time::Duration;
-
-    let addr: SocketAddr = ([127, 0, 0, 1], gateway_port).into();
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(2)) else {
-        return false;
-    };
-
-    // A short read timeout: if the server is alive it will wait for us
-    // to send a TLS ClientHello, so the read will time out (= good).
-    // If the connection resets or closes, the server is dead.
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .ok();
-    let mut buf = [0u8; 1];
-    match stream.read(&mut buf) {
-        Err(e)
-            if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut =>
-        {
-            true // Timeout = server alive, waiting for ClientHello.
-        }
-        _ => false, // Reset, EOF, or unexpected data = not healthy.
-    }
-}
-
 static CHILD_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 extern "C" fn forward_signal(_sig: libc::c_int) {
@@ -1613,8 +1544,8 @@ mod tests {
             fs::set_permissions(&gvproxy, perms).expect("chmod gvproxy");
         }
 
-        let resolved_gvproxy = validate_runtime_dir(&dir).expect("runtime bundle should validate");
-        assert_eq!(resolved_gvproxy, gvproxy);
+        validate_runtime_dir(&dir).expect("runtime bundle should validate");
+        assert!(gvproxy.exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

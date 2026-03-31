@@ -1,5 +1,7 @@
 # Custom libkrunfw Runtime
 
+> Status: Experimental and work in progress (WIP). VM support is under active development and may change.
+
 This directory contains the build infrastructure for a custom `libkrunfw` runtime
 that enables bridge CNI and netfilter support in the OpenShell gateway VM.
 
@@ -21,7 +23,7 @@ that enables these networking and sandboxing features.
 runtime/
   build-custom-libkrunfw.sh   # Build script for custom libkrunfw
   kernel/
-    bridge-cni.config          # Kernel config fragment (networking + sandboxing)
+    openshell.kconfig          # Kernel config fragment (networking + sandboxing)
 ```
 
 ## Building
@@ -51,7 +53,7 @@ target/custom-runtime/
   libkrunfw.dylib              # The custom library
   libkrunfw.<version>.dylib    # Version-suffixed copy
   provenance.json              # Build metadata (commit, hash, timestamp)
-  bridge-cni.config            # The config fragment used
+  openshell.kconfig            # The config fragment used
   kernel.config                # Full kernel .config (for debugging)
 ```
 
