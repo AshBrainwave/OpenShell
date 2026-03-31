@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Build a minimal aarch64 Ubuntu rootfs for embedding in openshell-vm.
+# Build a minimal Ubuntu rootfs for embedding in openshell-vm.
 #
 # This produces a lightweight rootfs (~200-300MB) with:
 # - Base Ubuntu with k3s binary
@@ -14,8 +14,11 @@
 # First boot will be slower (~30-60s) as k3s initializes and pulls images,
 # but subsequent boots use cached state.
 #
+# Supports aarch64 and x86_64 guest architectures. The target architecture
+# is auto-detected from the host but can be overridden with --arch.
+#
 # Usage:
-#   ./build-rootfs-minimal.sh [output_dir]
+#   ./build-rootfs-minimal.sh [--arch aarch64|x86_64] [output_dir]
 #
 # Requires: Docker, curl, helm
 
@@ -30,8 +33,54 @@ if [ -f "$PINS_FILE" ]; then
     # shellcheck source=../pins.env
     source "$PINS_FILE"
 fi
+
+# ── Architecture detection ─────────────────────────────────────────────
+# Allow override via --arch flag; default to host architecture.
+GUEST_ARCH=""
+POSITIONAL_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --arch)
+            GUEST_ARCH="$2"; shift 2 ;;
+        *)
+            POSITIONAL_ARGS+=("$1"); shift ;;
+    esac
+done
+
+if [ -z "$GUEST_ARCH" ]; then
+    case "$(uname -m)" in
+        aarch64|arm64) GUEST_ARCH="aarch64" ;;
+        x86_64)        GUEST_ARCH="x86_64" ;;
+        *)
+            echo "ERROR: Unsupported host architecture: $(uname -m)" >&2
+            echo "       Use --arch aarch64 or --arch x86_64 to override." >&2
+            exit 1
+            ;;
+    esac
+fi
+
+case "$GUEST_ARCH" in
+    aarch64)
+        DOCKER_PLATFORM="linux/arm64"
+        K3S_BINARY_SUFFIX="-arm64"
+        K3S_CHECKSUM_VAR="K3S_ARM64_SHA256"
+        RUST_TARGET="aarch64-unknown-linux-gnu"
+        ;;
+    x86_64)
+        DOCKER_PLATFORM="linux/amd64"
+        K3S_BINARY_SUFFIX=""    # x86_64 binary has no suffix
+        K3S_CHECKSUM_VAR="K3S_AMD64_SHA256"
+        RUST_TARGET="x86_64-unknown-linux-gnu"
+        ;;
+    *)
+        echo "ERROR: Unsupported guest architecture: ${GUEST_ARCH}" >&2
+        echo "       Supported: aarch64, x86_64" >&2
+        exit 1
+        ;;
+esac
+
 DEFAULT_ROOTFS="${XDG_DATA_HOME:-${HOME}/.local/share}/openshell/openshell-vm/rootfs"
-ROOTFS_DIR="${1:-${DEFAULT_ROOTFS}}"
+ROOTFS_DIR="${POSITIONAL_ARGS[0]:-${DEFAULT_ROOTFS}}"
 CONTAINER_NAME="krun-rootfs-minimal-builder"
 BASE_IMAGE_TAG="krun-rootfs:openshell-vm-minimal"
 K3S_VERSION="${K3S_VERSION:-v1.35.2+k3s1}"
@@ -40,7 +89,18 @@ K3S_VERSION="${K3S_VERSION//-k3s/+k3s}"
 # Project root (two levels up from crates/openshell-vm/scripts/)
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
+# Cross-platform checksum helper
+verify_checksum() {
+    local expected="$1" file="$2"
+    if command -v sha256sum &>/dev/null; then
+        echo "${expected}  ${file}" | sha256sum -c -
+    else
+        echo "${expected}  ${file}" | shasum -a 256 -c -
+    fi
+}
+
 echo "==> Building minimal openshell-vm rootfs"
+echo "    Guest arch:  ${GUEST_ARCH}"
 echo "    k3s version: ${K3S_VERSION}"
 echo "    Output:      ${ROOTFS_DIR}"
 echo "    Mode:        minimal (no pre-loaded images, cold start)"
@@ -80,29 +140,30 @@ if [ -f "${VM_STATE_FILE}" ]; then
 fi
 
 # ── Download k3s binary ─────────────────────────────────────────────────
-K3S_BIN="/tmp/k3s-arm64-${K3S_VERSION}"
+K3S_BIN="/tmp/k3s-${GUEST_ARCH}-${K3S_VERSION}"
 if [ -f "${K3S_BIN}" ]; then
     echo "==> Using cached k3s binary: ${K3S_BIN}"
 else
-    echo "==> Downloading k3s ${K3S_VERSION} for arm64..."
-    curl -fSL "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s-arm64" \
+    echo "==> Downloading k3s ${K3S_VERSION} for ${GUEST_ARCH}..."
+    curl -fSL "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s${K3S_BINARY_SUFFIX}" \
         -o "${K3S_BIN}"
     chmod +x "${K3S_BIN}"
 fi
 
 # Verify k3s binary integrity.
-if [ -n "${K3S_ARM64_SHA256:-}" ]; then
+K3S_CHECKSUM="${!K3S_CHECKSUM_VAR:-}"
+if [ -n "${K3S_CHECKSUM}" ]; then
     echo "==> Verifying k3s binary checksum..."
-    echo "${K3S_ARM64_SHA256}  ${K3S_BIN}" | shasum -a 256 -c -
+    verify_checksum "${K3S_CHECKSUM}" "${K3S_BIN}"
 else
-    echo "WARNING: K3S_ARM64_SHA256 not set, skipping checksum verification"
+    echo "WARNING: ${K3S_CHECKSUM_VAR} not set, skipping checksum verification"
 fi
 
 # ── Build base image ───────────────────────────────────────────────────
 docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
 
 echo "==> Building base image..."
-docker build --platform linux/arm64 -t "${BASE_IMAGE_TAG}" \
+docker build --platform "${DOCKER_PLATFORM}" -t "${BASE_IMAGE_TAG}" \
     --build-arg "BASE_IMAGE=${VM_BASE_IMAGE}" -f - . <<'DOCKERFILE'
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
@@ -122,7 +183,7 @@ DOCKERFILE
 
 # Create container and export filesystem
 echo "==> Creating container..."
-docker create --platform linux/arm64 --name "${CONTAINER_NAME}" "${BASE_IMAGE_TAG}" /bin/true
+docker create --platform "${DOCKER_PLATFORM}" --name "${CONTAINER_NAME}" "${BASE_IMAGE_TAG}" /bin/true
 
 echo "==> Exporting filesystem..."
 if [ -d "${ROOTFS_DIR}" ]; then
@@ -155,7 +216,7 @@ cp "${SCRIPT_DIR}/openshell-vm-exec-agent.py" "${ROOTFS_DIR}/srv/openshell-vm-ex
 chmod +x "${ROOTFS_DIR}/srv/openshell-vm-exec-agent.py"
 
 # ── Build and inject supervisor binary ─────────────────────────────────
-SUPERVISOR_TARGET="aarch64-unknown-linux-gnu"
+SUPERVISOR_TARGET="${RUST_TARGET}"
 SUPERVISOR_BIN="${PROJECT_ROOT}/target/${SUPERVISOR_TARGET}/release/openshell-sandbox"
 
 echo "==> Building openshell-sandbox supervisor binary (${SUPERVISOR_TARGET})..."

@@ -149,7 +149,14 @@ else
     cat "$FRAGMENT" >> .config
 fi
 
-make ARCH=arm64 olddefconfig
+# Detect the kernel ARCH value from the host (or krunvm guest) architecture.
+case "$(uname -m)" in
+    aarch64) KARCH="arm64" ;;
+    x86_64)  KARCH="x86_64" ;;
+    *)       KARCH="$(uname -m)" ;;
+esac
+echo "  Kernel ARCH: ${KARCH}"
+make ARCH="${KARCH}" olddefconfig
 
 # Verify critical configs are set
 REQUIRED=(

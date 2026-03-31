@@ -451,7 +451,26 @@ fn configure_runtime_loader_env(runtime_dir: &Path) -> Result<(), VmError> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn configure_runtime_loader_env(runtime_dir: &Path) -> Result<(), VmError> {
+    // On Linux, libkrun.so has a DT_NEEDED for libkrunfw.so. Even though we
+    // preload libkrunfw with RTLD_GLOBAL, the ELF dynamic linker still resolves
+    // DT_NEEDED entries through LD_LIBRARY_PATH / system paths. Without this,
+    // dlopen("libkrun.so") fails if libkrunfw.so is only in the runtime bundle.
+    let existing = std::env::var_os("LD_LIBRARY_PATH");
+    let mut paths = vec![runtime_dir.to_path_buf()];
+    if let Some(existing) = existing {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    let joined = std::env::join_paths(paths)
+        .map_err(|e| VmError::HostSetup(format!("join LD_LIBRARY_PATH: {e}")))?;
+    unsafe {
+        std::env::set_var("LD_LIBRARY_PATH", joined);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn configure_runtime_loader_env(_runtime_dir: &Path) -> Result<(), VmError> {
     Ok(())
 }

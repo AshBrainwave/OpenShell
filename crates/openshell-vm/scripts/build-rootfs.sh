@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Build an aarch64 Ubuntu rootfs for the openshell-vm microVM.
+# Build a Ubuntu rootfs for the openshell-vm microVM.
 #
 # Produces a rootfs with k3s pre-installed, the OpenShell helm chart and
 # manifests baked in, container images pre-loaded, AND a fully initialized
@@ -11,8 +11,11 @@
 # On first VM boot, k3s resumes from this pre-baked state instead of
 # cold-starting, achieving ~3-5s startup times.
 #
+# Supports aarch64 and x86_64 guest architectures. The target architecture
+# is auto-detected from the host but can be overridden with --arch.
+#
 # Usage:
-#   ./crates/openshell-vm/scripts/build-rootfs.sh [output_dir]
+#   ./crates/openshell-vm/scripts/build-rootfs.sh [--arch aarch64|x86_64] [output_dir]
 #
 # Requires: Docker (or compatible container runtime), curl, helm, zstd
 
@@ -27,8 +30,54 @@ if [ -f "$PINS_FILE" ]; then
     # shellcheck source=../pins.env
     source "$PINS_FILE"
 fi
+
+# ── Architecture detection ─────────────────────────────────────────────
+# Allow override via --arch flag; default to host architecture.
+GUEST_ARCH=""
+POSITIONAL_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --arch)
+            GUEST_ARCH="$2"; shift 2 ;;
+        *)
+            POSITIONAL_ARGS+=("$1"); shift ;;
+    esac
+done
+
+if [ -z "$GUEST_ARCH" ]; then
+    case "$(uname -m)" in
+        aarch64|arm64) GUEST_ARCH="aarch64" ;;
+        x86_64)        GUEST_ARCH="x86_64" ;;
+        *)
+            echo "ERROR: Unsupported host architecture: $(uname -m)" >&2
+            echo "       Use --arch aarch64 or --arch x86_64 to override." >&2
+            exit 1
+            ;;
+    esac
+fi
+
+case "$GUEST_ARCH" in
+    aarch64)
+        DOCKER_PLATFORM="linux/arm64"
+        K3S_BINARY_SUFFIX="-arm64"
+        K3S_CHECKSUM_VAR="K3S_ARM64_SHA256"
+        RUST_TARGET="aarch64-unknown-linux-gnu"
+        ;;
+    x86_64)
+        DOCKER_PLATFORM="linux/amd64"
+        K3S_BINARY_SUFFIX=""    # x86_64 binary has no suffix
+        K3S_CHECKSUM_VAR="K3S_AMD64_SHA256"
+        RUST_TARGET="x86_64-unknown-linux-gnu"
+        ;;
+    *)
+        echo "ERROR: Unsupported guest architecture: ${GUEST_ARCH}" >&2
+        echo "       Supported: aarch64, x86_64" >&2
+        exit 1
+        ;;
+esac
+
 DEFAULT_ROOTFS="${XDG_DATA_HOME:-${HOME}/.local/share}/openshell/openshell-vm/rootfs"
-ROOTFS_DIR="${1:-${DEFAULT_ROOTFS}}"
+ROOTFS_DIR="${POSITIONAL_ARGS[0]:-${DEFAULT_ROOTFS}}"
 CONTAINER_NAME="krun-rootfs-builder"
 INIT_CONTAINER_NAME="krun-k3s-init"
 BASE_IMAGE_TAG="krun-rootfs:openshell-vm"
@@ -41,14 +90,25 @@ K3S_VERSION="${K3S_VERSION//-k3s/+k3s}"
 # Project root (two levels up from crates/openshell-vm/scripts/)
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# Container images to pre-load into k3s (arm64).
+# Container images to pre-load into k3s.
 # AGENT_SANDBOX_IMAGE and COMMUNITY_SANDBOX_IMAGE are digest-pinned in pins.env.
 # SERVER_IMAGE is intentionally unpinned (local dev artifact).
 IMAGE_REPO_BASE="${IMAGE_REPO_BASE:-openshell}"
 IMAGE_TAG="${IMAGE_TAG:-dev}"
 SERVER_IMAGE="${IMAGE_REPO_BASE}/gateway:${IMAGE_TAG}"
 
+# Cross-platform checksum helper
+verify_checksum() {
+    local expected="$1" file="$2"
+    if command -v sha256sum &>/dev/null; then
+        echo "${expected}  ${file}" | sha256sum -c -
+    else
+        echo "${expected}  ${file}" | shasum -a 256 -c -
+    fi
+}
+
 echo "==> Building openshell-vm rootfs"
+echo "    Guest arch:  ${GUEST_ARCH}"
 echo "    k3s version: ${K3S_VERSION}"
 echo "    Images:      ${SERVER_IMAGE}, ${COMMUNITY_SANDBOX_IMAGE}"
 echo "    Output:      ${ROOTFS_DIR}"
@@ -115,22 +175,23 @@ fi
 
 # ── Download k3s binary (outside Docker — much faster) ─────────────────
 
-K3S_BIN="/tmp/k3s-arm64-${K3S_VERSION}"
+K3S_BIN="/tmp/k3s-${GUEST_ARCH}-${K3S_VERSION}"
 if [ -f "${K3S_BIN}" ]; then
     echo "==> Using cached k3s binary: ${K3S_BIN}"
 else
-    echo "==> Downloading k3s ${K3S_VERSION} for arm64..."
-    curl -fSL "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s-arm64" \
+    echo "==> Downloading k3s ${K3S_VERSION} for ${GUEST_ARCH}..."
+    curl -fSL "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s${K3S_BINARY_SUFFIX}" \
         -o "${K3S_BIN}"
     chmod +x "${K3S_BIN}"
 fi
 
 # Verify k3s binary integrity.
-if [ -n "${K3S_ARM64_SHA256:-}" ]; then
+K3S_CHECKSUM="${!K3S_CHECKSUM_VAR:-}"
+if [ -n "${K3S_CHECKSUM}" ]; then
     echo "==> Verifying k3s binary checksum..."
-    echo "${K3S_ARM64_SHA256}  ${K3S_BIN}" | shasum -a 256 -c -
+    verify_checksum "${K3S_CHECKSUM}" "${K3S_BIN}"
 else
-    echo "WARNING: K3S_ARM64_SHA256 not set, skipping checksum verification"
+    echo "WARNING: ${K3S_CHECKSUM_VAR} not set, skipping checksum verification"
 fi
 
 # ── Build base image with dependencies ─────────────────────────────────
@@ -140,7 +201,7 @@ docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
 docker rm -f "${INIT_CONTAINER_NAME}" 2>/dev/null || true
 
 echo "==> Building base image..."
-docker build --platform linux/arm64 -t "${BASE_IMAGE_TAG}" \
+docker build --platform "${DOCKER_PLATFORM}" -t "${BASE_IMAGE_TAG}" \
     --build-arg "BASE_IMAGE=${VM_BASE_IMAGE}" -f - . <<'DOCKERFILE'
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
@@ -161,7 +222,7 @@ DOCKERFILE
 
 # Create a container and export the filesystem
 echo "==> Creating container..."
-docker create --platform linux/arm64 --name "${CONTAINER_NAME}" "${BASE_IMAGE_TAG}" /bin/true
+docker create --platform "${DOCKER_PLATFORM}" --name "${CONTAINER_NAME}" "${BASE_IMAGE_TAG}" /bin/true
 
 echo "==> Exporting filesystem..."
 # Previous builds may leave overlayfs work/ dirs with permissions that
@@ -217,7 +278,7 @@ chmod +x "${ROOTFS_DIR}/srv/openshell-vm-exec-agent.py"
 # Dockerfile.cluster supervisor-builder stage; here we cross-compile
 # from the host using cargo-zigbuild.
 
-SUPERVISOR_TARGET="aarch64-unknown-linux-gnu"
+SUPERVISOR_TARGET="${RUST_TARGET}"
 SUPERVISOR_BIN="${PROJECT_ROOT}/target/${SUPERVISOR_TARGET}/release/openshell-sandbox"
 
 echo "==> Building openshell-sandbox supervisor binary (${SUPERVISOR_TARGET})..."
@@ -281,9 +342,10 @@ for manifest in openshell-helmchart.yaml agent-sandbox.yaml; do
 done
 
 # ── Pre-load container images ────────────────────────────────────────
-# Pull arm64 images and save as tarballs in the k3s airgap images
-# directory. k3s auto-imports from /var/lib/rancher/k3s/agent/images/
-# on startup, so no internet access is needed at boot time.
+# Pull images for the target architecture and save as tarballs in the
+# k3s airgap images directory. k3s auto-imports from
+# /var/lib/rancher/k3s/agent/images/ on startup, so no internet access
+# is needed at boot time.
 #
 # Tarballs are cached in a persistent directory outside the rootfs so
 # they survive rebuilds. This avoids re-pulling and re-saving ~1 GiB
@@ -293,7 +355,7 @@ IMAGES_DIR="${ROOTFS_DIR}/var/lib/rancher/k3s/agent/images"
 IMAGE_CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/openshell/openshell-vm/images"
 mkdir -p "${IMAGES_DIR}" "${IMAGE_CACHE_DIR}"
 
-echo "==> Pre-loading container images (arm64)..."
+echo "==> Pre-loading container images (${GUEST_ARCH})..."
 
 pull_and_save() {
     local image="$1"
@@ -310,7 +372,7 @@ pull_and_save() {
     # Try to pull; if the registry is unavailable, fall back to the
     # local Docker image cache (image may exist from a previous pull).
     echo "    pulling: ${image}..."
-    if ! docker pull --platform linux/arm64 "${image}" --quiet 2>/dev/null; then
+    if ! docker pull --platform "${DOCKER_PLATFORM}" "${image}" --quiet 2>/dev/null; then
         echo "    pull failed, checking local Docker cache..."
         if ! docker image inspect "${image}" >/dev/null 2>&1; then
             echo "ERROR: image ${image} not available locally or from registry"
@@ -469,13 +531,22 @@ fi
 
 # Helper: run a command inside the VM via the exec agent.
 vm_exec() {
-    DYLD_FALLBACK_LIBRARY_PATH="${RUNTIME_DIR}${DYLD_FALLBACK_LIBRARY_PATH:+:${DYLD_FALLBACK_LIBRARY_PATH}}" \
-        "${GATEWAY_BIN}" --rootfs "${ROOTFS_DIR}" exec -- "$@" 2>&1
+    if [ "$(uname -s)" = "Darwin" ]; then
+        DYLD_FALLBACK_LIBRARY_PATH="${RUNTIME_DIR}${DYLD_FALLBACK_LIBRARY_PATH:+:${DYLD_FALLBACK_LIBRARY_PATH}}" \
+            "${GATEWAY_BIN}" --rootfs "${ROOTFS_DIR}" exec -- "$@" 2>&1
+    else
+        LD_LIBRARY_PATH="${RUNTIME_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+            "${GATEWAY_BIN}" --rootfs "${ROOTFS_DIR}" exec -- "$@" 2>&1
+    fi
 }
 
 # Ensure no stale VM is using this rootfs.
 echo "    Starting VM for pre-initialization..."
-export DYLD_FALLBACK_LIBRARY_PATH="${RUNTIME_DIR}${DYLD_FALLBACK_LIBRARY_PATH:+:${DYLD_FALLBACK_LIBRARY_PATH}}"
+if [ "$(uname -s)" = "Darwin" ]; then
+    export DYLD_FALLBACK_LIBRARY_PATH="${RUNTIME_DIR}${DYLD_FALLBACK_LIBRARY_PATH:+:${DYLD_FALLBACK_LIBRARY_PATH}}"
+else
+    export LD_LIBRARY_PATH="${RUNTIME_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
 "${GATEWAY_BIN}" --rootfs "${ROOTFS_DIR}" --reset &
 VM_PID=$!
 

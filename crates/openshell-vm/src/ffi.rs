@@ -239,12 +239,20 @@ fn compute_sha256(path: &Path) -> Result<String, std::io::Error> {
 
     let mut file = fs::File::open(path)?;
 
-    let mut child = Command::new("shasum")
-        .args(["-a", "256"])
+    // sha256sum is standard on Linux; shasum ships with macOS/Perl.
+    let mut child = Command::new("sha256sum")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .or_else(|_| {
+            Command::new("shasum")
+                .args(["-a", "256"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+        })?;
 
     // Stream file contents directly to shasum's stdin in 8KB chunks.
     {
