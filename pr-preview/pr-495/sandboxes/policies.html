@@ -903,7 +903,7 @@ Dynamic sections can be updated on a running sandbox with <code class="docutils 
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">landlock</span></code></p></td>
 <td><p>Static</p></td>
-<td><p>Configures Landlock LSM enforcement behavior. Set <code class="docutils literal notranslate"><span class="pre">compatibility</span></code> to <code class="docutils literal notranslate"><span class="pre">best_effort</span></code> (use the highest ABI the host kernel supports) or <code class="docutils literal notranslate"><span class="pre">hard_requirement</span></code> (fail if the required ABI is unavailable).</p></td>
+<td><p>Configures Landlock LSM enforcement behavior. Set <code class="docutils literal notranslate"><span class="pre">compatibility</span></code> to <code class="docutils literal notranslate"><span class="pre">best_effort</span></code> (skip individual inaccessible paths while applying remaining rules) or <code class="docutils literal notranslate"><span class="pre">hard_requirement</span></code> (fail if any path is inaccessible or the required kernel ABI is unavailable). See the <a class="reference internal" href="../reference/policy-schema.html#landlock"><span class="std std-ref">Policy Schema Reference</span></a> for the full behavior table.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">process</span></code></p></td>
 <td><p>Static</p></td>
@@ -916,6 +916,17 @@ Dynamic sections can be updated on a running sandbox with <code class="docutils 
 </tbody>
 </table>
 </div>
+</section>
+<section id="baseline-filesystem-paths">
+<h2>Baseline Filesystem Paths<a class="headerlink" href="#baseline-filesystem-paths" title="Link to this heading">#</a></h2>
+<p>When a sandbox runs in proxy mode (the default), OpenShell automatically adds baseline filesystem paths required for the sandbox child process to function: <code class="docutils literal notranslate"><span class="pre">/usr</span></code>, <code class="docutils literal notranslate"><span class="pre">/lib</span></code>, <code class="docutils literal notranslate"><span class="pre">/etc</span></code>, <code class="docutils literal notranslate"><span class="pre">/var/log</span></code> (read-only) and <code class="docutils literal notranslate"><span class="pre">/sandbox</span></code>, <code class="docutils literal notranslate"><span class="pre">/tmp</span></code> (read-write). Paths like <code class="docutils literal notranslate"><span class="pre">/app</span></code> are included in the baseline set but are only added if they exist in the container image.</p>
+<p>This filtering prevents a missing baseline path from degrading Landlock enforcement. Without it, a single missing path could cause the entire Landlock ruleset to fail, leaving the sandbox with no filesystem restrictions at all.</p>
+<p>User-specified paths in your policy YAML are not pre-filtered. If you list a path that does not exist:</p>
+<ul class="simple">
+<li><p>In <code class="docutils literal notranslate"><span class="pre">best_effort</span></code> mode, the path is skipped with a warning and remaining rules are still applied.</p></li>
+<li><p>In <code class="docutils literal notranslate"><span class="pre">hard_requirement</span></code> mode, sandbox startup fails immediately.</p></li>
+</ul>
+<p>This distinction means baseline system paths degrade gracefully while user-specified paths surface configuration errors.</p>
 </section>
 <section id="apply-a-custom-policy">
 <h2>Apply a Custom Policy<a class="headerlink" href="#apply-a-custom-policy" title="Link to this heading">#</a></h2>
@@ -1076,6 +1087,30 @@ Granular rules</label><div class="sd-tab-content docutils">
 <p>Endpoints with <code class="docutils literal notranslate"><span class="pre">protocol:</span> <span class="pre">rest</span></code> enable HTTP request inspection. The proxy auto-detects TLS on HTTPS endpoints, terminates it, and checks each HTTP request against the <code class="docutils literal notranslate"><span class="pre">rules</span></code> list.</p>
 </div>
 </div>
+<section id="query-parameter-matching">
+<h3>Query parameter matching<a class="headerlink" href="#query-parameter-matching" title="Link to this heading">#</a></h3>
+<p>REST rules can also constrain query parameter values:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="w">  </span><span class="nt">download_api</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">download_api</span>
+<span class="w">    </span><span class="nt">endpoints</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">api.example.com</span>
+<span class="w">        </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">443</span>
+<span class="w">        </span><span class="nt">protocol</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rest</span>
+<span class="w">        </span><span class="nt">enforcement</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">enforce</span>
+<span class="w">        </span><span class="nt">rules</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">allow</span><span class="p">:</span>
+<span class="w">              </span><span class="nt">method</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">GET</span>
+<span class="w">              </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;/api/v1/download&quot;</span>
+<span class="w">              </span><span class="nt">query</span><span class="p">:</span>
+<span class="w">                </span><span class="nt">slug</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;skill-*&quot;</span>
+<span class="w">                </span><span class="nt">version</span><span class="p">:</span>
+<span class="w">                  </span><span class="nt">any</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;1.*&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;2.*&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">binaries</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> path</span><span class="p">:</span><span class="w"> </span><span class="nv">/usr/bin/curl</span><span class="w"> </span><span class="p p-Indicator">}</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">query</span></code> matchers are case-sensitive and run on decoded values. If a request has duplicate keys (for example, <code class="docutils literal notranslate"><span class="pre">tag=a&amp;tag=b</span></code>), every value for that key must match the configured glob(s).</p>
+</section>
 </section>
 <section id="next-steps">
 <h2>Next Steps<a class="headerlink" href="#next-steps" title="Link to this heading">#</a></h2>
@@ -1138,11 +1173,15 @@ Granular rules</label><div class="sd-tab-content docutils">
   <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="visible nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#policy-structure">Policy Structure</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#baseline-filesystem-paths">Baseline Filesystem Paths</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#apply-a-custom-policy">Apply a Custom Policy</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#iterate-on-a-running-sandbox">Iterate on a Running Sandbox</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#global-policy-override">Global Policy Override</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#debug-denied-requests">Debug Denied Requests</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#examples">Examples</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#examples">Examples</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#query-parameter-matching">Query parameter matching</a></li>
+</ul>
+</li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#next-steps">Next Steps</a></li>
 </ul>
   </nav></div>

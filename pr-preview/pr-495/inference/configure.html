@@ -419,7 +419,7 @@
 <section class="tex2jax_ignore mathjax_ignore" id="configure-inference-routing">
 <h1>Configure Inference Routing<a class="headerlink" href="#configure-inference-routing" title="Link to this heading">#</a></h1>
 <p>This page covers the managed local inference endpoint (<code class="docutils literal notranslate"><span class="pre">https://inference.local</span></code>). External inference endpoints go through sandbox <code class="docutils literal notranslate"><span class="pre">network_policies</span></code>. Refer to <a class="reference internal" href="../sandboxes/policies.html"><span class="std std-doc">Policies</span></a> for details.</p>
-<p>The configuration consists of two values:</p>
+<p>The configuration consists of three values:</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <thead>
 <tr class="row-odd"><th class="head"><p>Value</p></th>
@@ -432,6 +432,9 @@
 </tr>
 <tr class="row-odd"><td><p>Model ID</p></td>
 <td><p>The model to use for generation requests.</p></td>
+</tr>
+<tr class="row-even"><td><p>Timeout</p></td>
+<td><p>Per-request timeout in seconds for upstream inference calls. Defaults to 60 seconds.</p></td>
 </tr>
 </tbody>
 </table>
@@ -497,6 +500,14 @@ Anthropic</label><div class="sd-tab-content docutils">
 <span class="w">    </span>--model<span class="w"> </span>nvidia/nemotron-3-nano-30b-a3b
 </pre></div>
 </div>
+<p>To override the default 60-second per-request timeout, add <code class="docutils literal notranslate"><span class="pre">--timeout</span></code>:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>inference<span class="w"> </span><span class="nb">set</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--provider<span class="w"> </span>nvidia-prod<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--model<span class="w"> </span>nvidia/nemotron-3-nano-30b-a3b<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--timeout<span class="w"> </span><span class="m">300</span>
+</pre></div>
+</div>
+<p>The value is in seconds. When <code class="docutils literal notranslate"><span class="pre">--timeout</span></code> is omitted (or set to <code class="docutils literal notranslate"><span class="pre">0</span></code>), the default of 60 seconds applies.</p>
 </section>
 <section id="verify-the-active-config">
 <h2>Verify the Active Config<a class="headerlink" href="#verify-the-active-config" title="Link to this heading">#</a></h2>
@@ -506,6 +517,7 @@ Anthropic</label><div class="sd-tab-content docutils">
 
 <span class="go">  Provider: nvidia-prod</span>
 <span class="go">  Model: nvidia/nemotron-3-nano-30b-a3b</span>
+<span class="go">  Timeout: 300s</span>
 <span class="go">  Version: 1</span>
 </pre></div>
 </div>
@@ -518,6 +530,10 @@ Anthropic</label><div class="sd-tab-content docutils">
 </div>
 <p>Or switch providers without repeating the current model:</p>
 <div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>inference<span class="w"> </span>update<span class="w"> </span>--provider<span class="w"> </span>openai-prod
+</pre></div>
+</div>
+<p>Or change only the timeout:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>openshell<span class="w"> </span>inference<span class="w"> </span>update<span class="w"> </span>--timeout<span class="w"> </span><span class="m">120</span>
 </pre></div>
 </div>
 </section>
@@ -555,7 +571,7 @@ Anthropic</label><div class="sd-tab-content docutils">
 <ul class="simple">
 <li><p>Gateway-scoped: Every sandbox using the active gateway sees the same <code class="docutils literal notranslate"><span class="pre">inference.local</span></code> backend.</p></li>
 <li><p>HTTPS only: <code class="docutils literal notranslate"><span class="pre">inference.local</span></code> is intercepted only for HTTPS traffic.</p></li>
-<li><p>Hot reload: Provider and inference changes are picked up within about 5 seconds by default.</p></li>
+<li><p>Hot reload: Provider, model, and timeout changes are picked up by running sandboxes within about 5 seconds by default. No sandbox recreation is required.</p></li>
 </ul>
 </section>
 </section>

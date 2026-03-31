@@ -536,7 +536,7 @@
 </thead>
 <tbody>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--gpu</span></code></p></td>
-<td><p>Enable NVIDIA GPU passthrough. Requires NVIDIA drivers and the Container Toolkit on the host. Accepts an optional value: omit for auto-select (CDI when enabled on the daemon, <code class="docutils literal notranslate"><span class="pre">--gpus</span> <span class="pre">all</span></code> otherwise), or <code class="docutils literal notranslate"><span class="pre">--gpu=legacy</span></code> to force <code class="docutils literal notranslate"><span class="pre">--gpus</span> <span class="pre">all</span></code>.</p></td>
+<td><p>Enable NVIDIA GPU passthrough. Requires NVIDIA drivers and the Container Toolkit on the host. OpenShell auto-selects CDI when enabled on the daemon and falls back to Docker’s NVIDIA GPU request path (<code class="docutils literal notranslate"><span class="pre">--gpus</span> <span class="pre">all</span></code>) otherwise.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--plaintext</span></code></p></td>
 <td><p>Listen on HTTP instead of mTLS. Use behind a TLS-terminating reverse proxy.</p></td>
