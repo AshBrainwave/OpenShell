@@ -1,0 +1,14 @@
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /etc
+  read_write:
+    - /sandbox
+    - /tmp
+
+# Empty network policies — deny all external. Only inference.local reachable.
+network_policies: {}

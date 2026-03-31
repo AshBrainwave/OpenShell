@@ -253,6 +253,8 @@ const POLICY_EXAMPLES: &str = "\x1b[1mALIAS\x1b[0m
   $ openshell policy set --global --policy policy.yaml
   $ openshell policy delete --global
   $ openshell policy list my-sandbox
+  $ openshell policy prove --policy policy.yaml --credentials creds.yaml
+  $ openshell policy prove --policy policy.yaml --credentials creds.yaml --compact
 ";
 
 const SETTINGS_EXAMPLES: &str = "\x1b[1mEXAMPLES\x1b[0m
@@ -1416,6 +1418,38 @@ enum PolicyCommands {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Formally verify a policy using the OpenShell Policy Prover (OPP).
+    ///
+    /// Runs Z3-based verification queries against a sandbox policy to detect
+    /// data exfiltration paths, write bypass attacks, L7 enforcement gaps,
+    /// and privilege escalation via binary capabilities.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    Prove {
+        /// Path to the sandbox policy YAML file.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        policy: String,
+
+        /// Path to the credential descriptor YAML file.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        credentials: String,
+
+        /// Path to the capability registry directory (default: bundled).
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        registry: Option<String>,
+
+        /// Path to accepted risks YAML.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        accepted_risks: Option<String>,
+
+        /// One-line-per-finding output for CI.
+        #[arg(long)]
+        compact: bool,
+
+        /// Output self-contained HTML report to this path.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        html: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1900,6 +1934,38 @@ async fn main() -> Result<()> {
                         ));
                     }
                     run::gateway_setting_delete(&ctx.endpoint, "policy", yes, &tls).await?;
+                }
+                PolicyCommands::Prove {
+                    policy,
+                    credentials,
+                    registry,
+                    accepted_risks,
+                    compact,
+                    html,
+                } => {
+                    let mut cmd = std::process::Command::new("python3");
+                    cmd.args(["-m", "openshell.prover.cli", "prove"]);
+                    cmd.args(["--policy", &policy]);
+                    cmd.args(["--credentials", &credentials]);
+                    if let Some(ref reg) = registry {
+                        cmd.args(["--registry", reg]);
+                    }
+                    if let Some(ref risks) = accepted_risks {
+                        cmd.args(["--accepted-risks", risks]);
+                    }
+                    if compact {
+                        cmd.arg("--compact");
+                    }
+                    if let Some(ref html_path) = html {
+                        cmd.args(["--html", html_path]);
+                    }
+                    let status = cmd
+                        .status()
+                        .into_diagnostic()
+                        .wrap_err("failed to execute policy prover — is the 'prover' optional dependency installed? (uv pip install 'openshell[prover]')")?;
+                    if !status.success() {
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
                 }
             }
         }

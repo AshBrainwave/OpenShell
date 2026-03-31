@@ -1,0 +1,16 @@
+binary: /usr/local/bin/npm
+description: "Node Package Manager — installs and manages JavaScript packages"
+protocols:
+  - name: npm-registry
+    transport: https
+    description: "npm registry protocol for package installation and publishing"
+    bypasses_l7: false
+    actions:
+      - { name: install, type: read, description: "Download packages from registry" }
+      - { name: publish, type: write, description: "Publish packages to registry" }
+spawns:
+  - /usr/local/bin/node
+  - /usr/bin/git
+can_exfiltrate: true
+exfil_mechanism: "Can publish arbitrary package contents to npm registry; postinstall scripts can exfiltrate"
+can_construct_http: false

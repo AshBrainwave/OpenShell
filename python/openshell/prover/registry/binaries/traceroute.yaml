@@ -1,0 +1,10 @@
+binary: /usr/bin/traceroute
+description: "Network path tracing utility"
+protocols:
+  - name: icmp
+    transport: icmp
+    actions:
+      - { name: trace, type: read }
+spawns: []
+can_exfiltrate: false
+can_construct_http: false

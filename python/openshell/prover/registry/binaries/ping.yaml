@@ -1,0 +1,12 @@
+binary: /usr/bin/ping
+description: "ICMP echo utility"
+protocols:
+  - name: icmp
+    transport: icmp
+    description: "ICMP echo — limited data channel"
+    bypasses_l7: true
+    actions:
+      - { name: ping, type: read }
+spawns: []
+can_exfiltrate: false
+can_construct_http: false

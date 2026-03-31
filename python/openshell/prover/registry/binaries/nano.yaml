@@ -1,0 +1,6 @@
+binary: /usr/bin/nano
+description: "Text editor"
+protocols: []
+spawns: []
+can_exfiltrate: false
+can_construct_http: false

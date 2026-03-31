@@ -1,0 +1,16 @@
+binary: /usr/local/bin/openclaw
+description: "OpenClaw agent CLI — manages agent sessions, plugins, and ClawHub integration"
+protocols:
+  - name: http-programmatic
+    transport: https
+    description: "OpenClaw makes HTTP requests to ClawHub, openclaw.ai, and plugin registries"
+    bypasses_l7: false
+    actions:
+      - { name: get, type: read }
+      - { name: post, type: write }
+spawns:
+  - /usr/local/bin/node
+  - /usr/local/bin/npm
+can_exfiltrate: true
+exfil_mechanism: "Can send data to ClawHub or plugin endpoints via HTTP"
+can_construct_http: true

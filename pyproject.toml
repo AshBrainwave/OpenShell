@@ -36,6 +36,13 @@ classifiers = [
 ]
 keywords = ["agent", "sandbox", "nvidia"]
 
+[project.optional-dependencies]
+prover = [
+    "z3-solver>=4.12",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+]
+
 [project.urls]
 source = "https://github.com/NVIDIA/OpenShell"
 documentation = "https://docs.nvidia.com/openshell/latest/"
@@ -51,6 +58,9 @@ dev = [
     "maturin>=1.5,<2.0",
     "setuptools-scm>=8",
     "grpcio-tools>=1.60",
+    "z3-solver>=4.12",
+    "pyyaml>=6.0",
+    "rich>=13.0",
 ]
 docs = [
     "sphinx<=7.5",

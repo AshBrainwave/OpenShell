@@ -22,8 +22,8 @@ These pipelines connect skills into end-to-end workflows. Individual skill files
   - Spike explores feasibility, then build executes once `state:agent-ready` is applied by a human.
 - **Security:** `review-security-issue` → `fix-security-issue`
   - Review produces a severity assessment and remediation plan. Fix implements it. Both require the `topic:security` label; fix also requires `state:agent-ready`.
-- **Policy iteration:** `openshell-cli` → `generate-sandbox-policy`
-  - CLI manages the sandbox lifecycle; policy generation authors the YAML constraints.
+- **Policy iteration:** `openshell-cli` → `generate-sandbox-policy` → `harden-sandbox-policy`
+  - CLI manages the sandbox lifecycle; policy generation authors the YAML constraints; policy hardening formally verifies and tightens the policy using the OpenShell Policy Prover (OPP).
 
 ## Architecture Overview
 
@@ -39,6 +39,7 @@ These pipelines connect skills into end-to-end workflows. Individual skill files
 | `crates/openshell-providers/` | Provider management | Credential provider backends |
 | `crates/openshell-tui/` | Terminal UI | Ratatui-based dashboard for monitoring |
 | `python/openshell/` | Python SDK | Python bindings and CLI packaging |
+| `python/openshell/prover/` | Policy Prover (OPP) | Z3-based formal verification for sandbox policies |
 | `proto/` | Protobuf definitions | gRPC service contracts |
 | `deploy/` | Docker, Helm, K8s | Dockerfiles, Helm chart, manifests |
 | `.agents/skills/` | Agent skills | Workflow automation for development |
