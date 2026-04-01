@@ -8,5 +8,5 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 0
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 codesign --entitlements "${ROOT}/crates/openshell-vm/entitlements.plist" --force -s - "${ROOT}/target/debug/openshell-vm"

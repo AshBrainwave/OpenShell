@@ -5,14 +5,14 @@
 # Build rootfs and compress to tarball for embedding in openshell-vm binary.
 #
 # This script:
-# 1. Builds the rootfs using build-rootfs.sh or build-rootfs-minimal.sh
+# 1. Builds the rootfs using build-rootfs.sh
 # 2. Compresses it to a zstd tarball for embedding
 #
 # Usage:
-#   ./build-rootfs-tarball.sh [--minimal]
+#   ./build-rootfs-tarball.sh [--base]
 #
 # Options:
-#   --minimal   Build a minimal rootfs (~200-300MB) without pre-loaded images.
+#   --base      Build a base rootfs (~200-300MB) without pre-loaded images.
 #               First boot will be slower but binary size is much smaller.
 #               Default: full rootfs with pre-loaded images (~2GB+).
 #
@@ -21,24 +21,24 @@
 
 set -euo pipefail
 
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 ROOTFS_BUILD_DIR="${ROOT}/target/rootfs-build"
 OUTPUT_DIR="${ROOT}/target/vm-runtime-compressed"
 OUTPUT="${OUTPUT_DIR}/rootfs.tar.zst"
 
 # Parse arguments
-MINIMAL=false
+BASE_ONLY=false
 for arg in "$@"; do
     case "$arg" in
-        --minimal)
-            MINIMAL=true
+        --base)
+            BASE_ONLY=true
             ;;
         --help|-h)
-            echo "Usage: $0 [--minimal]"
+            echo "Usage: $0 [--base]"
             echo ""
             echo "Options:"
-            echo "  --minimal   Build minimal rootfs (~200-300MB) without pre-loaded images"
-            echo "              First boot will be slower but binary size is much smaller"
+            echo "  --base   Build base rootfs (~200-300MB) without pre-loaded images"
+            echo "           First boot will be slower but binary size is much smaller"
             exit 0
             ;;
         *)
@@ -63,16 +63,16 @@ if ! docker info &>/dev/null; then
     exit 1
 fi
 
-if [ "$MINIMAL" = true ]; then
-    echo "==> Building MINIMAL rootfs for embedding"
+if [ "$BASE_ONLY" = true ]; then
+    echo "==> Building BASE rootfs for embedding"
     echo "    Build dir: ${ROOTFS_BUILD_DIR}"
     echo "    Output:    ${OUTPUT}"
-    echo "    Mode:      minimal (no pre-loaded images, ~200-300MB)"
+    echo "    Mode:      base (no pre-loaded images, ~200-300MB)"
     echo ""
     
-    # Build minimal rootfs
-    echo "==> Step 1/2: Building minimal rootfs..."
-    "${ROOT}/crates/openshell-vm/scripts/build-rootfs-minimal.sh" "${ROOTFS_BUILD_DIR}"
+    # Build base rootfs
+    echo "==> Step 1/2: Building base rootfs..."
+    "${ROOT}/crates/openshell-vm/scripts/build-rootfs.sh" --base "${ROOTFS_BUILD_DIR}"
 else
     echo "==> Building FULL rootfs for embedding"
     echo "    Build dir: ${ROOTFS_BUILD_DIR}"
@@ -107,8 +107,8 @@ echo ""
 echo "==> Rootfs tarball created successfully!"
 echo "    Output:     ${OUTPUT}"
 echo "    Compressed: $(du -sh "${OUTPUT}" | cut -f1)"
-if [ "$MINIMAL" = true ]; then
-    echo "    Type:       minimal (first boot ~30-60s, images pulled on demand)"
+if [ "$BASE_ONLY" = true ]; then
+    echo "    Type:       base (first boot ~30-60s, images pulled on demand)"
 else
     echo "    Type:       full (first boot ~3-5s, images pre-loaded)"
 fi

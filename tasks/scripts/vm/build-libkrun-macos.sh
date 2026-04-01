@@ -22,9 +22,11 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 BUILD_DIR="${ROOT}/target/libkrun-build"
 OUTPUT_DIR="${BUILD_DIR}"
+BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+CUSTOM_RUNTIME="${ROOT}/target/custom-runtime"
 
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "Error: This script only runs on macOS" >&2
@@ -54,7 +56,7 @@ check_deps() {
     fi
     
     # Check for lld (LLVM linker)
-    if ! command -v ld.lld &>/dev/null && ! [ -x "$(brew --prefix llvm 2>/dev/null)/bin/ld.lld" ]; then
+    if ! command -v ld.lld &>/dev/null && ! [ -x "${BREW_PREFIX}/opt/llvm/bin/ld.lld" ]; then
         MISSING="$MISSING lld"
     fi
     
@@ -64,8 +66,6 @@ check_deps() {
     fi
     
     # Check for libkrunfw
-    BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
-    CUSTOM_RUNTIME="${ROOT}/target/custom-runtime"
     if [ ! -f "${BREW_PREFIX}/lib/libkrunfw.dylib" ] && \
        [ ! -f "${BREW_PREFIX}/lib/libkrunfw.5.dylib" ] && \
        [ ! -f "${CUSTOM_RUNTIME}/libkrunfw.dylib" ]; then
@@ -93,26 +93,19 @@ cd "$BUILD_DIR"
 
 LIBKRUN_REF="${LIBKRUN_REF:-v1.17.4}"
 
-if [ -d libkrun ]; then
-    echo "==> Updating existing libkrun checkout..."
-    cd libkrun
-    git fetch origin --tags
-    git checkout "${LIBKRUN_REF}" 2>/dev/null || git checkout "tags/${LIBKRUN_REF}" 2>/dev/null || {
-        echo "Error: Could not checkout ${LIBKRUN_REF}" >&2
-        exit 1
-    }
-    cd ..
-else
-    echo "==> Cloning libkrun (${LIBKRUN_REF})..."
+if [ ! -d libkrun ]; then
+    echo "==> Cloning libkrun..."
     git clone https://github.com/containers/libkrun.git
-    cd libkrun
-    git fetch --tags
-    git checkout "${LIBKRUN_REF}" 2>/dev/null || git checkout "tags/${LIBKRUN_REF}" 2>/dev/null || {
-        echo "Error: Could not checkout ${LIBKRUN_REF}" >&2
-        exit 1
-    }
-    cd ..
 fi
+
+echo "==> Checking out ${LIBKRUN_REF}..."
+cd libkrun
+git fetch origin --tags
+git checkout "${LIBKRUN_REF}" 2>/dev/null || git checkout "tags/${LIBKRUN_REF}" 2>/dev/null || {
+    echo "Error: Could not checkout ${LIBKRUN_REF}" >&2
+    exit 1
+}
+cd ..
 
 LIBKRUN_COMMIT=$(git -C libkrun rev-parse HEAD)
 echo "    Commit: ${LIBKRUN_COMMIT}"
@@ -125,9 +118,6 @@ echo ""
 echo "==> Building libkrun with NET=1 BLK=1 (no GPU)..."
 
 # Find libkrunfw - prefer custom build with bridge support
-BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
-CUSTOM_RUNTIME="${ROOT}/target/custom-runtime"
-
 if [ -f "${CUSTOM_RUNTIME}/provenance.json" ] && [ -f "${CUSTOM_RUNTIME}/libkrunfw.dylib" ]; then
     LIBKRUNFW_DIR="${CUSTOM_RUNTIME}"
     echo "    Using custom libkrunfw from ${LIBKRUNFW_DIR}"
@@ -142,7 +132,7 @@ export DYLD_LIBRARY_PATH="${LIBKRUNFW_DIR}:${BREW_PREFIX}/lib:${DYLD_LIBRARY_PAT
 
 # Set up LLVM/clang for bindgen (required by krun_display/krun_input if they get compiled)
 # Note: DYLD_LIBRARY_PATH is needed at runtime for the build scripts that use libclang
-LLVM_PREFIX="$(brew --prefix llvm 2>/dev/null || echo /opt/homebrew/opt/llvm)"
+LLVM_PREFIX="${BREW_PREFIX}/opt/llvm"
 if [ -d "$LLVM_PREFIX" ]; then
     export LIBCLANG_PATH="${LLVM_PREFIX}/lib"
     export DYLD_LIBRARY_PATH="${LLVM_PREFIX}/lib:${DYLD_LIBRARY_PATH:-}"

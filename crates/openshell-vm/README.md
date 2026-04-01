@@ -147,7 +147,7 @@ mise run vm:build:rootfs-tarball
 Just k3s + supervisor, cold starts in ~30-60s:
 
 ```bash
-mise run vm:build:rootfs-tarball:minimal
+mise run vm:build:rootfs-tarball:base
 ```
 
 ## Custom Kernel (libkrunfw)
@@ -199,7 +199,7 @@ Guest VM (aarch64 Linux)
 | `vm:build:embedded` | Build single binary with embedded runtime |
 | `vm:build:embedded:quick` | Build using cached rootfs tarball |
 | `vm:build:rootfs-tarball` | Build full rootfs tarball |
-| `vm:build:rootfs-tarball:minimal` | Build minimal rootfs tarball |
+| `vm:build:rootfs-tarball:base` | Build base rootfs tarball |
 | `vm:runtime:compress` | Compress runtime artifacts for embedding |
 | `vm:runtime:build-libkrunfw` | Build custom libkrunfw |
 | `vm:runtime:build-libkrun` | Build libkrun from source (Linux) |

@@ -4,20 +4,28 @@
 
 # Build a Ubuntu rootfs for the openshell-vm microVM.
 #
-# Produces a rootfs with k3s pre-installed, the OpenShell helm chart and
-# manifests baked in, container images pre-loaded, AND a fully initialized
-# k3s cluster state (database, TLS, images imported, all services deployed).
+# By default, produces a fully pre-initialized rootfs with k3s pre-installed,
+# the OpenShell helm chart and manifests baked in, container images pre-loaded,
+# AND a fully initialized k3s cluster state (database, TLS, images imported,
+# all services deployed). On first VM boot, k3s resumes from this pre-baked
+# state instead of cold-starting, achieving ~3-5s startup times.
 #
-# On first VM boot, k3s resumes from this pre-baked state instead of
-# cold-starting, achieving ~3-5s startup times.
+# With --base, produces a lightweight rootfs (~200-300MB) with:
+# - Base Ubuntu with k3s binary
+# - OpenShell supervisor binary
+# - Helm charts and Kubernetes manifests
+# - NO pre-loaded container images (pulled on demand)
+# - NO pre-initialized k3s state (cold start on first boot)
+# First boot will be slower (~30-60s) as k3s initializes and pulls images.
 #
 # Supports aarch64 and x86_64 guest architectures. The target architecture
 # is auto-detected from the host but can be overridden with --arch.
 #
 # Usage:
-#   ./crates/openshell-vm/scripts/build-rootfs.sh [--arch aarch64|x86_64] [output_dir]
+#   ./build-rootfs.sh [--base] [--arch aarch64|x86_64] [output_dir]
 #
-# Requires: Docker (or compatible container runtime), curl, helm, zstd
+# Requires: Docker (or compatible container runtime), curl, helm
+# Full mode (default) also requires: zstd, sqlite3, a built openshell-vm binary
 
 set -euo pipefail
 
@@ -31,12 +39,14 @@ if [ -f "$PINS_FILE" ]; then
     source "$PINS_FILE"
 fi
 
-# ── Architecture detection ─────────────────────────────────────────────
-# Allow override via --arch flag; default to host architecture.
+# ── Argument parsing ───────────────────────────────────────────────────
+BASE_ONLY=false
 GUEST_ARCH=""
 POSITIONAL_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --base)
+            BASE_ONLY=true; shift ;;
         --arch)
             GUEST_ARCH="$2"; shift 2 ;;
         *)
@@ -44,6 +54,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── Architecture detection ─────────────────────────────────────────────
+# Allow override via --arch flag; default to host architecture.
 if [ -z "$GUEST_ARCH" ]; then
     case "$(uname -m)" in
         aarch64|arm64) GUEST_ARCH="aarch64" ;;
@@ -79,7 +91,6 @@ esac
 DEFAULT_ROOTFS="${XDG_DATA_HOME:-${HOME}/.local/share}/openshell/openshell-vm/rootfs"
 ROOTFS_DIR="${POSITIONAL_ARGS[0]:-${DEFAULT_ROOTFS}}"
 CONTAINER_NAME="krun-rootfs-builder"
-INIT_CONTAINER_NAME="krun-k3s-init"
 BASE_IMAGE_TAG="krun-rootfs:openshell-vm"
 # K3S_VERSION uses the semver "+" form for GitHub releases.
 # The mise env may provide the Docker-tag form with "-" instead of "+";
@@ -90,7 +101,7 @@ K3S_VERSION="${K3S_VERSION//-k3s/+k3s}"
 # Project root (two levels up from crates/openshell-vm/scripts/)
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# Container images to pre-load into k3s.
+# Container images to pre-load into k3s (full mode only).
 # AGENT_SANDBOX_IMAGE and COMMUNITY_SANDBOX_IMAGE are digest-pinned in pins.env.
 # SERVER_IMAGE is intentionally unpinned (local dev artifact).
 IMAGE_REPO_BASE="${IMAGE_REPO_BASE:-openshell}"
@@ -107,11 +118,21 @@ verify_checksum() {
     fi
 }
 
-echo "==> Building openshell-vm rootfs"
-echo "    Guest arch:  ${GUEST_ARCH}"
-echo "    k3s version: ${K3S_VERSION}"
-echo "    Images:      ${SERVER_IMAGE}, ${COMMUNITY_SANDBOX_IMAGE}"
-echo "    Output:      ${ROOTFS_DIR}"
+if [ "$BASE_ONLY" = true ]; then
+    echo "==> Building base openshell-vm rootfs"
+    echo "    Guest arch:  ${GUEST_ARCH}"
+    echo "    k3s version: ${K3S_VERSION}"
+    echo "    Output:      ${ROOTFS_DIR}"
+    echo "    Mode:        base (no pre-loaded images, cold start)"
+else
+    echo "==> Building openshell-vm rootfs"
+    echo "    Guest arch:  ${GUEST_ARCH}"
+    echo "    k3s version: ${K3S_VERSION}"
+    echo "    Images:      ${SERVER_IMAGE}, ${COMMUNITY_SANDBOX_IMAGE}"
+    echo "    Output:      ${ROOTFS_DIR}"
+    echo "    Mode:        full (pre-loaded images, pre-initialized)"
+fi
+echo ""
 
 # ── Check for running VM ────────────────────────────────────────────────
 # If an openshell-vm is using this rootfs via virtio-fs, wiping the rootfs
@@ -198,7 +219,6 @@ fi
 
 # Clean up any previous run
 docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
-docker rm -f "${INIT_CONTAINER_NAME}" 2>/dev/null || true
 
 echo "==> Building base image..."
 docker build --platform "${DOCKER_PLATFORM}" -t "${BASE_IMAGE_TAG}" \
@@ -254,14 +274,10 @@ chmod +x "${ROOTFS_DIR}"/var/lib/rancher/k3s/data/*/bin/aux/* 2>/dev/null || tru
 
 # ── Inject scripts ────────────────────────────────────────────────────
 
-echo "==> Injecting openshell-vm-init.sh..."
+echo "==> Injecting scripts..."
 mkdir -p "${ROOTFS_DIR}/srv"
 cp "${SCRIPT_DIR}/openshell-vm-init.sh" "${ROOTFS_DIR}/srv/openshell-vm-init.sh"
 chmod +x "${ROOTFS_DIR}/srv/openshell-vm-init.sh"
-
-# Keep the hello server around for debugging
-cp "${SCRIPT_DIR}/hello-server.py" "${ROOTFS_DIR}/srv/hello-server.py"
-chmod +x "${ROOTFS_DIR}/srv/hello-server.py"
 
 # Inject VM capability checker for runtime diagnostics.
 cp "${SCRIPT_DIR}/check-vm-capabilities.sh" "${ROOTFS_DIR}/srv/check-vm-capabilities.sh"
@@ -340,6 +356,41 @@ for manifest in openshell-helmchart.yaml agent-sandbox.yaml; do
         echo "WARNING: ${manifest} not found in ${MANIFEST_SRC}"
     fi
 done
+
+# ── Base mode: mark rootfs type and skip pre-loading ───────────────────
+
+if [ "$BASE_ONLY" = true ]; then
+    # k3s expects this directory to exist for airgap image loading.
+    mkdir -p "${ROOTFS_DIR}/var/lib/rancher/k3s/agent/images"
+
+    # Mark as base (not pre-initialized). The init script checks for
+    # this file to determine if cold start is expected.
+    echo "base" > "${ROOTFS_DIR}/opt/openshell/.rootfs-type"
+
+    # ── Verify ─────────────────────────────────────────────────────────
+    if [ ! -f "${ROOTFS_DIR}/usr/local/bin/k3s" ]; then
+        echo "ERROR: k3s binary not found in rootfs."
+        exit 1
+    fi
+
+    if [ ! -x "${ROOTFS_DIR}/opt/openshell/bin/openshell-sandbox" ]; then
+        echo "ERROR: openshell-sandbox supervisor binary not found in rootfs."
+        exit 1
+    fi
+
+    echo ""
+    echo "==> Base rootfs ready at: ${ROOTFS_DIR}"
+    echo "    Size: $(du -sh "${ROOTFS_DIR}" | cut -f1)"
+    echo "    Type: base (cold start, images pulled on demand)"
+    echo ""
+    echo "Note: First boot will take ~30-60s as k3s initializes."
+    echo "      Container images will be pulled from registries on first use."
+    exit 0
+fi
+
+# ══════════════════════════════════════════════════════════════════════════
+# Full mode: pre-load images and pre-initialize k3s cluster state
+# ══════════════════════════════════════════════════════════════════════════
 
 # ── Pre-load container images ────────────────────────────────────────
 # Pull images for the target architecture and save as tarballs in the

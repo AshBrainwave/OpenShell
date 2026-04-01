@@ -18,8 +18,9 @@
 
 set -euo pipefail
 
-# Use git to find the project root reliably
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+GVPROXY_VERSION="${GVPROXY_VERSION:-v0.8.8}"
 
 # ── macOS dylib portability helpers ─────────────────────────────────────
 
@@ -43,57 +44,6 @@ make_dylib_portable() {
     codesign -f -s - "$dylib" 2>/dev/null || true
 }
 
-# Bundle GPU dependencies (libepoxy, virglrenderer, MoltenVK) for Homebrew libkrun
-bundle_gpu_dependencies() {
-    local work_dir="$1"
-    local brew_prefix
-    brew_prefix="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
-    
-    # Dependencies to bundle
-    local deps=(
-        "${brew_prefix}/opt/libepoxy/lib/libepoxy.0.dylib"
-        "${brew_prefix}/opt/virglrenderer/lib/libvirglrenderer.1.dylib"
-        "${brew_prefix}/opt/molten-vk/lib/libMoltenVK.dylib"
-    )
-    
-    for dep in "${deps[@]}"; do
-        if [ -f "$dep" ]; then
-            local dep_name
-            dep_name="$(basename "$dep")"
-            cp "$dep" "${work_dir}/${dep_name}"
-            echo "      Copied: ${dep_name}"
-        fi
-    done
-    
-    # Rewrite all paths to use @loader_path
-    for dylib in "${work_dir}"/*.dylib; do
-        [ -f "$dylib" ] || continue
-        
-        # Rewrite install name
-        local dylib_name
-        dylib_name="$(basename "$dylib")"
-        install_name_tool -id "@loader_path/${dylib_name}" "$dylib" 2>/dev/null || true
-        
-        # Rewrite all Homebrew references to @loader_path
-        for dep in "${deps[@]}"; do
-            local dep_name
-            dep_name="$(basename "$dep")"
-            install_name_tool -change "$dep" "@loader_path/${dep_name}" "$dylib" 2>/dev/null || true
-        done
-        
-        # Also rewrite libkrunfw
-        local krunfw_path
-        krunfw_path=$(otool -L "$dylib" 2>/dev/null | grep libkrunfw | awk '{print $1}' || true)
-        if [ -n "$krunfw_path" ] && [[ "$krunfw_path" != @* ]]; then
-            install_name_tool -change "$krunfw_path" "@loader_path/libkrunfw.dylib" "$dylib"
-        fi
-        
-        # Re-codesign
-        codesign -f -s - "$dylib" 2>/dev/null || true
-    done
-    
-    echo "      All dependencies rewritten to use @loader_path"
-}
 WORK_DIR="${ROOT}/target/vm-runtime"
 OUTPUT_DIR="${OPENSHELL_VM_RUNTIME_COMPRESSED_DIR:-${ROOT}/target/vm-runtime-compressed}"
 
@@ -110,7 +60,6 @@ case "$(uname -s)-$(uname -m)" in
     # Source priority for libkrun:
     # 1. Custom build from build-libkrun-macos.sh (portable, no GPU deps)
     # 2. Custom runtime with custom libkrunfw
-    # 3. Homebrew (has GPU deps, not portable)
     LIBKRUN_BUILD_DIR="${ROOT}/target/libkrun-build"
     CUSTOM_DIR="${ROOT}/target/custom-runtime"
     BREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
@@ -140,32 +89,9 @@ case "$(uname -s)-$(uname -m)" in
       # libkrunfw from custom build
       cp "${CUSTOM_DIR}/libkrunfw.dylib" "$WORK_DIR/"
     else
-      echo "    Using Homebrew runtime from ${BREW_PREFIX}/lib"
-      echo "    Warning: Homebrew libkrun has GPU dependencies (libepoxy, virglrenderer)"
-      echo "             For a portable build, run: mise run vm:runtime:build-libkrun-macos"
-      
-      cp "${BREW_PREFIX}/lib/libkrun.dylib" "$WORK_DIR/"
-      
-      # Copy libkrunfw
-      for krunfw in "${BREW_PREFIX}/lib"/libkrunfw*.dylib; do
-        [ -f "$krunfw" ] || continue
-        if [ -L "$krunfw" ]; then
-          target=$(readlink "$krunfw")
-          if [[ "$target" != /* ]]; then
-            target="${BREW_PREFIX}/lib/${target}"
-          fi
-          cp "$target" "$WORK_DIR/$(basename "$krunfw")"
-        else
-          cp "$krunfw" "$WORK_DIR/"
-        fi
-      done
-      
-      # If using Homebrew libkrun with GPU, we need to bundle the GPU dependencies
-      # for portability. Check if libkrun has GPU deps:
-      if otool -L "$WORK_DIR/libkrun.dylib" | grep -q "libepoxy\|virglrenderer"; then
-        echo "    Bundling GPU dependencies for portability..."
-        bundle_gpu_dependencies "$WORK_DIR"
-      fi
+      echo "Error: No portable libkrun build found." >&2
+      echo "       Run: mise run vm:runtime:build-libkrun-macos" >&2
+      exit 1
     fi
     
     # Normalize libkrunfw naming - ensure we have libkrunfw.dylib
@@ -177,8 +103,8 @@ case "$(uname -s)-$(uname -m)" in
     if [ -x /opt/podman/bin/gvproxy ]; then
       cp /opt/podman/bin/gvproxy "$WORK_DIR/"
       echo "    Using gvproxy from Podman"
-    elif [ -x "$(brew --prefix 2>/dev/null)/bin/gvproxy" ]; then
-      cp "$(brew --prefix)/bin/gvproxy" "$WORK_DIR/"
+    elif [ -x "${BREW_PREFIX}/bin/gvproxy" ]; then
+      cp "${BREW_PREFIX}/bin/gvproxy" "$WORK_DIR/"
       echo "    Using gvproxy from Homebrew"
     else
       echo "Error: gvproxy not found. Install Podman Desktop or run: brew install gvproxy" >&2
@@ -186,9 +112,18 @@ case "$(uname -s)-$(uname -m)" in
     fi
     ;;
     
-  Linux-aarch64)
-    PLATFORM="linux-aarch64"
-    echo "    Platform: Linux ARM64"
+  Linux-*)
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+      aarch64) GVPROXY_ARCH="arm64" ;;
+      x86_64)  GVPROXY_ARCH="amd64" ;;
+      *)
+        echo "Error: Unsupported Linux architecture: ${ARCH}" >&2
+        exit 1
+        ;;
+    esac
+    PLATFORM="linux-${ARCH}"
+    echo "    Platform: Linux ${ARCH}"
     
     BUILD_DIR="${ROOT}/target/libkrun-build"
     if [ ! -f "${BUILD_DIR}/libkrun.so" ]; then
@@ -215,45 +150,9 @@ case "$(uname -s)-$(uname -m)" in
 
     # Download gvproxy if not present
     if [ ! -f "$WORK_DIR/gvproxy" ]; then
-      echo "    Downloading gvproxy for linux-arm64..."
+      echo "    Downloading gvproxy for linux-${GVPROXY_ARCH}..."
       curl -fsSL -o "$WORK_DIR/gvproxy" \
-        "https://github.com/containers/gvisor-tap-vsock/releases/download/v0.8.8/gvproxy-linux-arm64"
-      chmod +x "$WORK_DIR/gvproxy"
-    fi
-    ;;
-    
-  Linux-x86_64)
-    PLATFORM="linux-x86_64"
-    echo "    Platform: Linux x86_64"
-    
-    BUILD_DIR="${ROOT}/target/libkrun-build"
-    if [ ! -f "${BUILD_DIR}/libkrun.so" ]; then
-      echo "Error: libkrun not found. Run: mise run vm:runtime:build-libkrun" >&2
-      exit 1
-    fi
-    
-    cp "${BUILD_DIR}/libkrun.so" "$WORK_DIR/"
-    
-    # Copy libkrunfw
-    for krunfw in "${BUILD_DIR}"/libkrunfw.so*; do
-      [ -f "$krunfw" ] || continue
-      cp "$krunfw" "$WORK_DIR/"
-    done
-    
-    # Ensure the soname symlink (libkrunfw.so.5) exists alongside the fully
-    # versioned file (libkrunfw.so.5.x.y). libloading loads by soname.
-    if [ ! -f "$WORK_DIR/libkrunfw.so.5" ]; then
-      versioned=$(ls "$WORK_DIR"/libkrunfw.so.5.* 2>/dev/null | head -n1)
-      if [ -n "$versioned" ]; then
-        cp "$versioned" "$WORK_DIR/libkrunfw.so.5"
-      fi
-    fi
-
-    # Download gvproxy if not present
-    if [ ! -f "$WORK_DIR/gvproxy" ]; then
-      echo "    Downloading gvproxy for linux-amd64..."
-      curl -fsSL -o "$WORK_DIR/gvproxy" \
-        "https://github.com/containers/gvisor-tap-vsock/releases/download/v0.8.8/gvproxy-linux-amd64"
+        "https://github.com/containers/gvisor-tap-vsock/releases/download/${GVPROXY_VERSION}/gvproxy-linux-${GVPROXY_ARCH}"
       chmod +x "$WORK_DIR/gvproxy"
     fi
     ;;
@@ -276,7 +175,7 @@ for file in "$WORK_DIR"/*; do
   [ -f "$file" ] || continue
   name=$(basename "$file")
   original_size=$(du -h "$file" | cut -f1)
-  zstd -19 -f -q -o "${OUTPUT_DIR}/${name}.zst" "$file"
+  zstd -19 -f -q -T0 -o "${OUTPUT_DIR}/${name}.zst" "$file"
   # Ensure compressed file is readable/writable (source may be read-only)
   chmod 644 "${OUTPUT_DIR}/${name}.zst"
   compressed_size=$(du -h "${OUTPUT_DIR}/${name}.zst" | cut -f1)

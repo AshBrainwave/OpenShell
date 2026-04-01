@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RUNTIME_DIR="${ROOT}/target/debug/openshell-vm.runtime"
 GATEWAY_BIN="${ROOT}/target/debug/openshell-vm"
 

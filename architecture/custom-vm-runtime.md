@@ -158,8 +158,8 @@ commands work the same way they would inside the VM shell.
 ## Build Commands
 
 ```bash
-# Build embedded binary with minimal rootfs (~120MB, recommended)
-mise run vm:build:rootfs-tarball:minimal  # Build minimal rootfs tarball
+# Build embedded binary with base rootfs (~120MB, recommended)
+mise run vm:build:rootfs-tarball:base     # Build base rootfs tarball
 mise run vm:build:embedded                 # Build binary with embedded rootfs
 
 # Quick rebuild (uses cached artifacts, skips rootfs rebuild)
@@ -197,9 +197,8 @@ mise run vm:build:embedded                # Then build embedded binary
 | `crates/openshell-vm/scripts/openshell-vm-exec-agent.py` | Guest-side exec agent |
 | `crates/openshell-vm/scripts/check-vm-capabilities.sh` | Kernel capability checker |
 | `crates/openshell-vm/runtime/` | Build pipeline and kernel config |
-| `tasks/scripts/compress-vm-runtime.sh` | Gather and compress runtime artifacts |
-| `tasks/scripts/build-rootfs-tarball.sh` | Build and compress rootfs tarball |
-| `tasks/scripts/build-libkrun.sh` | Build libkrun from source (Linux) |
-| `crates/openshell-vm/scripts/build-rootfs.sh` | Build full rootfs with pre-loaded images |
-| `crates/openshell-vm/scripts/build-rootfs-minimal.sh` | Build minimal rootfs without images |
+| `tasks/scripts/vm/compress-vm-runtime.sh` | Gather and compress runtime artifacts |
+| `tasks/scripts/vm/build-rootfs-tarball.sh` | Build and compress rootfs tarball |
+| `tasks/scripts/vm/build-libkrun.sh` | Build libkrun from source (Linux) |
+| `crates/openshell-vm/scripts/build-rootfs.sh` | Build rootfs (full by default, `--base` for lightweight) |
 | `tasks/vm.toml` | Mise task definitions |

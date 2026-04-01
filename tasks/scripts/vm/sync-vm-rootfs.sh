@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 ROOTFS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/openshell/openshell-vm/rootfs"
 SCRIPT_DIR="${ROOT}/crates/openshell-vm/scripts"
 
@@ -24,7 +24,7 @@ fi
 echo "Syncing development artifacts into rootfs..."
 
 # ── Init scripts and utilities ─────────────────────────────────────────
-for script in openshell-vm-init.sh openshell-vm-exec-agent.py check-vm-capabilities.sh hello-server.py; do
+for script in openshell-vm-init.sh openshell-vm-exec-agent.py check-vm-capabilities.sh; do
     src="${SCRIPT_DIR}/${script}"
     dst="${ROOTFS_DIR}/srv/${script}"
     if [ -f "$src" ]; then
