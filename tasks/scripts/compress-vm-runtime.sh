@@ -204,6 +204,15 @@ case "$(uname -s)-$(uname -m)" in
       cp "$krunfw" "$WORK_DIR/"
     done
     
+    # Ensure the soname symlink (libkrunfw.so.5) exists alongside the fully
+    # versioned file (libkrunfw.so.5.x.y). libloading loads by soname.
+    if [ ! -f "$WORK_DIR/libkrunfw.so.5" ]; then
+      versioned=$(ls "$WORK_DIR"/libkrunfw.so.5.* 2>/dev/null | head -n1)
+      if [ -n "$versioned" ]; then
+        cp "$versioned" "$WORK_DIR/libkrunfw.so.5"
+      fi
+    fi
+
     # Download gvproxy if not present
     if [ ! -f "$WORK_DIR/gvproxy" ]; then
       echo "    Downloading gvproxy for linux-arm64..."
@@ -231,6 +240,15 @@ case "$(uname -s)-$(uname -m)" in
       cp "$krunfw" "$WORK_DIR/"
     done
     
+    # Ensure the soname symlink (libkrunfw.so.5) exists alongside the fully
+    # versioned file (libkrunfw.so.5.x.y). libloading loads by soname.
+    if [ ! -f "$WORK_DIR/libkrunfw.so.5" ]; then
+      versioned=$(ls "$WORK_DIR"/libkrunfw.so.5.* 2>/dev/null | head -n1)
+      if [ -n "$versioned" ]; then
+        cp "$versioned" "$WORK_DIR/libkrunfw.so.5"
+      fi
+    fi
+
     # Download gvproxy if not present
     if [ ! -f "$WORK_DIR/gvproxy" ]; then
       echo "    Downloading gvproxy for linux-amd64..."

@@ -18,6 +18,21 @@ use std::{env, fs};
 fn main() {
     println!("cargo:rerun-if-env-changed=OPENSHELL_VM_RUNTIME_COMPRESSED_DIR");
 
+    // Re-run if any compressed artifact changes.
+    if let Ok(dir) = env::var("OPENSHELL_VM_RUNTIME_COMPRESSED_DIR") {
+        println!("cargo:rerun-if-changed={dir}");
+        for name in &[
+            "libkrun.so.zst",
+            "libkrunfw.so.5.zst",
+            "libkrun.dylib.zst",
+            "libkrunfw.5.dylib.zst",
+            "gvproxy.zst",
+            "rootfs.tar.zst",
+        ] {
+            println!("cargo:rerun-if-changed={dir}/{name}");
+        }
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();

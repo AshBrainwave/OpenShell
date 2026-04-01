@@ -61,7 +61,16 @@ type KrunAddVsockPort2 =
 type KrunStartEnter = unsafe extern "C" fn(ctx_id: u32) -> i32;
 type KrunDisableImplicitVsock = unsafe extern "C" fn(ctx_id: u32) -> i32;
 type KrunAddVsock = unsafe extern "C" fn(ctx_id: u32, tsi_features: u32) -> i32;
+#[cfg(target_os = "macos")]
 type KrunAddNetUnixgram = unsafe extern "C" fn(
+    ctx_id: u32,
+    c_path: *const c_char,
+    fd: i32,
+    c_mac: *const u8,
+    features: u32,
+    flags: u32,
+) -> i32;
+type KrunAddNetUnixstream = unsafe extern "C" fn(
     ctx_id: u32,
     c_path: *const c_char,
     fd: i32,
@@ -84,7 +93,9 @@ pub struct LibKrun {
     pub krun_start_enter: KrunStartEnter,
     pub krun_disable_implicit_vsock: KrunDisableImplicitVsock,
     pub krun_add_vsock: KrunAddVsock,
+    #[cfg(target_os = "macos")]
     pub krun_add_net_unixgram: KrunAddNetUnixgram,
+    pub krun_add_net_unixstream: KrunAddNetUnixstream,
 }
 
 static LIBKRUN: OnceLock<LibKrun> = OnceLock::new();
@@ -155,7 +166,9 @@ impl LibKrun {
                 &path,
             )?,
             krun_add_vsock: load_symbol(library, b"krun_add_vsock\0", &path)?,
+            #[cfg(target_os = "macos")]
             krun_add_net_unixgram: load_symbol(library, b"krun_add_net_unixgram\0", &path)?,
+            krun_add_net_unixstream: load_symbol(library, b"krun_add_net_unixstream\0", &path)?,
         })
     }
 }

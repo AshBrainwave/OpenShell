@@ -9,6 +9,7 @@
 
 [vm]
 description = "Build and run the standalone openshell-vm microVM"
+depends = ["build:docker:gateway"]
 run = [
   "mise run vm:build:embedded",
   "tasks/scripts/ensure-vm-rootfs.sh",
@@ -19,6 +20,7 @@ hide = false
 
 ["vm:build"]
 description = "Force a fresh openshell-vm rebuild, including the rootfs"
+depends = ["build:docker:gateway"]
 run = [
   "mise run vm:build:embedded",
   "OPENSHELL_VM_FORCE_ROOTFS_REBUILD=1 tasks/scripts/ensure-vm-rootfs.sh",
@@ -36,7 +38,13 @@ run = [
   "mise run vm:runtime:compress",
   "OPENSHELL_VM_RUNTIME_COMPRESSED_DIR=$PWD/target/vm-runtime-compressed cargo build -p openshell-vm",
   "tasks/scripts/codesign-openshell-vm.sh",
+  "tasks/scripts/bundle-vm-runtime.sh",
 ]
+hide = false
+
+["vm:bundle-runtime"]
+description = "Stage the openshell-vm sidecar runtime bundle next to local build outputs"
+run = "tasks/scripts/bundle-vm-runtime.sh"
 hide = false
 
 ["vm:build:binary"]

@@ -43,7 +43,7 @@ install_deps() {
   
   if command -v apt-get &>/dev/null; then
     # Debian/Ubuntu
-    DEPS="build-essential git python3 python3-pyelftools flex bison libelf-dev libssl-dev bc curl"
+    DEPS="build-essential git python3 python3-pyelftools flex bison libelf-dev libssl-dev bc curl libclang-dev"
     MISSING=""
     for dep in $DEPS; do
       if ! dpkg -s "$dep" &>/dev/null; then
@@ -60,7 +60,7 @@ install_deps() {
     
   elif command -v dnf &>/dev/null; then
     # Fedora/RHEL
-    DEPS="make git python3 python3-pyelftools gcc flex bison elfutils-libelf-devel openssl-devel bc glibc-static curl"
+    DEPS="make git python3 python3-pyelftools gcc flex bison elfutils-libelf-devel openssl-devel bc glibc-static curl clang-devel"
     echo "    Installing dependencies via dnf..."
     sudo dnf install -y $DEPS
     
@@ -90,22 +90,94 @@ fi
 
 cd libkrunfw
 
-# Copy custom kernel config
+# Copy custom kernel config fragment
 if [ -f "$KERNEL_CONFIG" ]; then
   cp "$KERNEL_CONFIG" openshell.kconfig
-  echo "    Applied custom kernel config: openshell.kconfig"
+  echo "    Applied custom kernel config fragment: openshell.kconfig"
 else
   echo "Warning: Custom kernel config not found at ${KERNEL_CONFIG}" >&2
   echo "    Building with default config (k3s networking may not work)" >&2
 fi
 
-# Build libkrunfw
 echo "    Building kernel and libkrunfw (this may take 15-20 minutes)..."
-if [ -f openshell.kconfig ]; then
-  make KCONFIG_FRAGMENT=openshell.kconfig -j"$(nproc)"
+
+# The libkrunfw Makefile does not support a config fragment — it copies the
+# base config and runs olddefconfig, then builds the kernel image in one
+# make invocation.  We cannot inject the fragment mid-build via make flags.
+#
+# Instead we drive the build in two phases:
+#
+#   Phase 1: Run the Makefile's $(KERNEL_SOURCES) target, which:
+#              - downloads and extracts the kernel tarball (if needed)
+#              - applies patches
+#              - copies config-libkrunfw_aarch64 to $(KERNEL_SOURCES)/.config
+#              - runs olddefconfig
+#
+#   Phase 2: Merge our fragment on top of the .config produced by Phase 1
+#            using the kernel's own merge_config.sh, then re-run olddefconfig
+#            to resolve new dependency chains (e.g. CONFIG_BRIDGE pulls in
+#            CONFIG_BRIDGE_NETFILTER which needs CONFIG_NETFILTER etc).
+#
+#   Phase 3: Let the Makefile build everything (kernel + kernel.c + .so),
+#            skipping the $(KERNEL_SOURCES) target since it already exists.
+
+KERNEL_VERSION="$(grep '^KERNEL_VERSION' Makefile | head -1 | awk '{print $3}')"
+KERNEL_SOURCES="${KERNEL_VERSION}"
+
+# Phase 1: prepare kernel source tree + base .config.
+# Run the Makefile's $(KERNEL_SOURCES) target whenever the .config is absent
+# (either because the tree was never extracted, or because it was cleaned).
+# The target is idempotent: if the directory already exists make skips the
+# tarball extraction but still copies the base config and runs olddefconfig.
+if [ ! -f "${KERNEL_SOURCES}/.config" ]; then
+  echo "    Phase 1: preparing kernel source tree and base .config..."
+  # Remove the directory so make re-runs the full $(KERNEL_SOURCES) recipe
+  # (extract + patch + config copy + olddefconfig).
+  rm -rf "${KERNEL_SOURCES}"
+  make "${KERNEL_SOURCES}"
 else
-  make -j"$(nproc)"
+  echo "    Phase 1: kernel source tree and .config already present, skipping"
 fi
+
+# Phase 2: merge the openshell fragment on top
+if [ -f openshell.kconfig ]; then
+  echo "    Phase 2: merging openshell.kconfig fragment..."
+
+  # merge_config.sh must be called with ARCH set so it finds the right Kconfig
+  # entry points. -m means "merge into existing .config" (vs starting fresh).
+  ARCH=arm64 KCONFIG_CONFIG="${KERNEL_SOURCES}/.config" \
+    "${KERNEL_SOURCES}/scripts/kconfig/merge_config.sh" \
+    -m -O "${KERNEL_SOURCES}" \
+    "${KERNEL_SOURCES}/.config" \
+    openshell.kconfig
+
+  # Re-run olddefconfig to fill in any new symbols introduced by the fragment.
+  make -C "${KERNEL_SOURCES}" ARCH=arm64 olddefconfig
+
+  # Verify that the key options were actually applied.
+  all_ok=true
+  for opt in CONFIG_BRIDGE CONFIG_NETFILTER CONFIG_NF_NAT; do
+    val="$(grep "^${opt}=" "${KERNEL_SOURCES}/.config" 2>/dev/null || true)"
+    if [ -n "$val" ]; then
+      echo "    ${opt}: ${val#*=}"
+    else
+      echo "    WARNING: ${opt} not set after merge!" >&2
+      all_ok=false
+    fi
+  done
+  if [ "$all_ok" = false ]; then
+    echo "ERROR: kernel config fragment merge failed — required options missing" >&2
+    exit 1
+  fi
+
+  # The kernel binary and kernel.c from the previous (bad) build must be
+  # removed so make rebuilds them with the updated .config.
+  rm -f kernel.c "${KERNEL_SOURCES}/arch/arm64/boot/Image" \
+        "${KERNEL_SOURCES}/vmlinux" libkrunfw.so*
+fi
+
+# Phase 3: build kernel image, kernel.c bundle, and the shared library
+make -j"$(nproc)"
 
 # Copy output
 cp libkrunfw.so* "$OUTPUT_DIR/"
@@ -127,6 +199,20 @@ cd libkrun
 
 # Build with NET support for gvproxy networking
 echo "    Building libkrun with NET=1..."
+
+# Locate libclang for clang-sys if LIBCLANG_PATH isn't already set.
+# clang-sys looks for libclang.so or libclang-*.so; on Debian/Ubuntu the
+# versioned file (e.g. libclang-18.so.18) lives under the LLVM lib dir.
+if [ -z "${LIBCLANG_PATH:-}" ]; then
+  for llvm_lib in /usr/lib/llvm-*/lib; do
+    if ls "$llvm_lib"/libclang*.so* &>/dev/null; then
+      export LIBCLANG_PATH="$llvm_lib"
+      echo "    LIBCLANG_PATH=$LIBCLANG_PATH"
+      break
+    fi
+  done
+fi
+
 make NET=1 -j"$(nproc)"
 
 # Copy output

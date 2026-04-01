@@ -26,8 +26,8 @@ use std::time::Instant;
 
 pub use exec::{
     VM_EXEC_VSOCK_PORT, VmExecOptions, VmRuntimeState, acquire_rootfs_lock, clear_vm_runtime_state,
-    ensure_vm_not_running, exec_running_vm, reset_runtime_state, vm_exec_socket_path,
-    vm_state_path, write_vm_runtime_state,
+    ensure_vm_not_running, exec_running_vm, recover_stale_kine_db, reset_runtime_state,
+    vm_exec_socket_path, vm_state_path, write_vm_runtime_state,
 };
 
 // ── Error type ─────────────────────────────────────────────────────────
@@ -624,6 +624,7 @@ impl VmContext {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn add_net_unixgram(
         &self,
         socket_path: &Path,
@@ -643,6 +644,28 @@ impl VmContext {
                     flags,
                 ),
                 "krun_add_net_unixgram",
+            )
+        }
+    }
+
+    fn add_net_unixstream(
+        &self,
+        socket_path: &Path,
+        mac: &[u8; 6],
+        features: u32,
+    ) -> Result<(), VmError> {
+        let sock_c = path_to_cstring(socket_path)?;
+        unsafe {
+            check(
+                (self.krun.krun_add_net_unixstream)(
+                    self.ctx_id,
+                    sock_c.as_ptr(),
+                    -1,
+                    mac.as_ptr(),
+                    features,
+                    0,
+                ),
+                "krun_add_net_unixstream",
             )
         }
     }
@@ -905,6 +928,14 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
         None
     };
 
+    // Recover from a corrupt or bootstrap-locked kine (SQLite) database.
+    // Runs on every normal boot (not under --reset, which wipes the entire
+    // k3s/server/ tree anyway). Must happen after the lock so we know no
+    // other VM process is using the rootfs.
+    if !config.reset && config.exec_path == "/srv/openshell-vm-init.sh" {
+        recover_stale_kine_db(&config.rootfs);
+    }
+
     // Wipe stale containerd/kubelet runtime state if requested.
     // This must happen after the lock (to confirm no other VM is using
     // the rootfs) but before booting (so the new VM starts clean).
@@ -970,7 +1001,7 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
                 .to_path_buf();
             let rootfs_key = vm_rootfs_key(&config.rootfs);
             let sock_base = gvproxy_socket_dir(&config.rootfs)?;
-            let vfkit_sock = sock_base.with_extension("v");
+            let net_sock = sock_base.with_extension("v");
             let api_sock = sock_base.with_extension("a");
 
             // Kill any stale gvproxy process from a previous run.
@@ -979,8 +1010,8 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
             kill_stale_gvproxy(&config.rootfs);
 
             // Clean stale sockets (including the -krun.sock file that
-            // libkrun creates as its datagram endpoint).
-            let _ = std::fs::remove_file(&vfkit_sock);
+            // libkrun creates as its datagram endpoint on macOS).
+            let _ = std::fs::remove_file(&net_sock);
             let _ = std::fs::remove_file(&api_sock);
             let krun_sock = sock_base.with_extension("v-krun.sock");
             let _ = std::fs::remove_file(&krun_sock);
@@ -991,9 +1022,21 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
             let gvproxy_log = run_dir.join(format!("{rootfs_key}-gvproxy.log"));
             let gvproxy_log_file = std::fs::File::create(&gvproxy_log)
                 .map_err(|e| VmError::Fork(format!("failed to create gvproxy log: {e}")))?;
+
+            // On Linux, gvproxy uses QEMU mode (SOCK_STREAM) since the vfkit
+            // unixgram scheme is macOS/vfkit-specific.  On macOS, use vfkit mode.
+            #[cfg(target_os = "linux")]
+            let (gvproxy_net_flag, gvproxy_net_url) =
+                ("-listen-qemu", format!("unix://{}", net_sock.display()));
+            #[cfg(target_os = "macos")]
+            let (gvproxy_net_flag, gvproxy_net_url) = (
+                "-listen-vfkit",
+                format!("unixgram://{}", net_sock.display()),
+            );
+
             let child = std::process::Command::new(binary)
-                .arg("-listen-vfkit")
-                .arg(format!("unixgram://{}", vfkit_sock.display()))
+                .arg(gvproxy_net_flag)
+                .arg(&gvproxy_net_url)
                 .arg("-listen")
                 .arg(format!("unix://{}", api_sock.display()))
                 .arg("-ssh-port")
@@ -1014,7 +1057,7 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
             {
                 let deadline = Instant::now() + std::time::Duration::from_secs(5);
                 let mut interval = std::time::Duration::from_millis(5);
-                while !vfkit_sock.exists() {
+                while !net_sock.exists() {
                     if Instant::now() >= deadline {
                         return Err(VmError::Fork(
                             "gvproxy socket did not appear within 5s".to_string(),
@@ -1046,9 +1089,17 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
                 | NET_FEATURE_GUEST_UFO
                 | NET_FEATURE_HOST_TSO4
                 | NET_FEATURE_HOST_UFO;
-            const NET_FLAG_VFKIT: u32 = 1 << 0;
 
-            vm.add_net_unixgram(&vfkit_sock, &mac, COMPAT_NET_FEATURES, NET_FLAG_VFKIT)?;
+            // On Linux use unixstream (SOCK_STREAM) to connect to gvproxy's
+            // QEMU listener.  On macOS use unixgram (SOCK_DGRAM) with the vfkit
+            // magic byte for the vfkit listener.
+            #[cfg(target_os = "linux")]
+            vm.add_net_unixstream(&net_sock, &mac, COMPAT_NET_FEATURES)?;
+            #[cfg(target_os = "macos")]
+            {
+                const NET_FLAG_VFKIT: u32 = 1 << 0;
+                vm.add_net_unixgram(&net_sock, &mac, COMPAT_NET_FEATURES, NET_FLAG_VFKIT)?;
+            }
 
             eprintln!(
                 "Networking: gvproxy (virtio-net) [{:.1}s]",

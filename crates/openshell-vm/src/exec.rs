@@ -212,6 +212,96 @@ pub fn reset_runtime_state(rootfs: &Path, gateway_name: &str) -> Result<(), VmEr
     Ok(())
 }
 
+/// Recover from a corrupt or bootstrap-locked kine (SQLite) database.
+///
+/// k3s uses kine with a SQLite backend at `var/lib/rancher/k3s/server/db/state.db`.
+/// If the VM is killed mid-write (SIGKILL, host crash, power loss), SQLite may
+/// not have checkpointed its WAL, leaving the database in one of two broken states:
+///
+/// 1. **Corrupt file** — the SQLite header magic is missing or the file is
+///    truncated. k3s opens the DB, gets `SQLITE_NOTADB` / `SQLITE_CORRUPT`,
+///    and crashes at startup.
+///
+/// 2. **Stale bootstrap lock** — the kine schema is intact but a previous server
+///    instance left the kine bootstrap lock held. k3s loops forever on
+///    "Bootstrap key already locked — waiting for data to be populated by
+///    another server" every 5 s. The VM appears booted but k3s never becomes
+///    ready.
+///
+/// Neither condition can be fixed inside the VM: k3s reads `state.db` before the
+/// init script has any chance to intervene. The only reliable recovery is to
+/// delete the file before boot and let k3s create a fresh one.
+///
+/// Since `state.db` contains only ephemeral single-node cluster state — all
+/// Kubernetes objects are re-applied from the auto-deploy manifests in
+/// `server/manifests/` on every cold start — removing it on every boot is safe.
+///
+/// **What is lost:** cluster object records (Pods, Deployments, etc.) and the
+/// bootstrap token. Both are re-created from manifests on boot.
+///
+/// **What is preserved:** all container images and snapshots (under `k3s/agent/`),
+/// PKI, and the `.initialized` sentinel.
+///
+/// This function is a no-op if `state.db` does not exist (e.g. first boot or
+/// after a full `--reset`).
+pub fn recover_stale_kine_db(rootfs: &Path) {
+    let db_path = rootfs.join("var/lib/rancher/k3s/server/db/state.db");
+    if !db_path.exists() {
+        return; // Nothing to check.
+    }
+
+    // The SQLite file format begins with a 16-byte magic string.
+    // Reference: https://www.sqlite.org/fileformat.html#the_database_header
+    const SQLITE_MAGIC: &[u8] = b"SQLite format 3\x00";
+
+    let corrupt = match fs::read(&db_path) {
+        Err(_) => true,                         // Can't read → treat as corrupt.
+        Ok(bytes) if bytes.len() < 100 => true, // Too short to be a valid DB.
+        Ok(bytes) => !bytes.starts_with(SQLITE_MAGIC),
+    };
+
+    if corrupt {
+        eprintln!(
+            "Warning: kine database is corrupt ({}), removing for clean boot",
+            db_path.display()
+        );
+        if let Err(e) = fs::remove_file(&db_path) {
+            eprintln!("Warning: failed to remove corrupt kine database: {e}");
+        }
+        // Also remove any WAL/SHM sidecar files left by the interrupted write.
+        let _ = fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = fs::remove_file(db_path.with_extension("db-shm"));
+        return;
+    }
+
+    // The file has a valid SQLite header. Even a structurally intact DB can
+    // cause k3s to hang forever with "Bootstrap key already locked — waiting
+    // for data to be populated by another server". This is a kine application-
+    // level lock: when a k3s server starts, kine marks bootstrap as "in
+    // progress"; if that server is killed before it finishes, the lock row
+    // persists and no subsequent server can complete bootstrap.
+    //
+    // There is no reliable way to detect this condition without executing
+    // SQLite queries (which would require a dependency). However, `state.db`
+    // contains only ephemeral cluster state for this single-node VM — all
+    // Kubernetes objects are re-created from the auto-deploy manifests in
+    // `server/manifests/` on every cold start. Removing the DB on every boot
+    // is therefore safe and guarantees a clean bootstrap every time, at the
+    // cost of ~1-2s extra startup time for k3s to recreate the schema.
+    //
+    // The DB is NOT removed under --reset (reset_runtime_state wipes the
+    // entire k3s/server/ tree, which is a superset of this operation).
+    eprintln!(
+        "Removing stale kine database for clean boot ({})",
+        db_path.display()
+    );
+    if let Err(e) = fs::remove_file(&db_path) {
+        eprintln!("Warning: failed to remove kine database: {e}");
+    }
+    let _ = fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = fs::remove_file(db_path.with_extension("db-shm"));
+}
+
 /// Acquire an exclusive lock on the rootfs lock file.
 ///
 /// The lock is held for the lifetime of the returned `File` handle. When

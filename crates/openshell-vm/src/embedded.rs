@@ -8,7 +8,7 @@
 //!
 //! Cache locations:
 //! - Runtime: `~/.local/share/openshell/vm-runtime/{version}/`
-//! - Rootfs:  `~/.local/share/openshell/openshell-vm/{version}/rootfs/`
+//! - Rootfs:  `~/.local/share/openshell/openshell-vm/rootfs/`
 
 use std::fs;
 use std::io::{Read, Write};
@@ -229,11 +229,7 @@ fn runtime_cache_base() -> Result<PathBuf, VmError> {
 fn rootfs_cache_dir() -> Result<PathBuf, VmError> {
     let base = openshell_core::paths::xdg_data_dir()
         .map_err(|e| VmError::HostSetup(format!("resolve XDG data dir: {e}")))?;
-    Ok(base
-        .join("openshell")
-        .join("openshell-vm")
-        .join(VERSION)
-        .join("rootfs"))
+    Ok(base.join("openshell").join("openshell-vm").join("rootfs"))
 }
 
 fn rootfs_cache_base() -> Result<PathBuf, VmError> {
