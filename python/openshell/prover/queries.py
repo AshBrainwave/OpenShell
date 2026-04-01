@@ -177,7 +177,7 @@ def check_write_bypass(model: ReachabilityModel) -> list[Finding]:
 
     for policy_name, rule in model.policy.network_policies.items():
         for ep in rule.endpoints:
-            if ep.intent not in (PolicyIntent.READ_ONLY, PolicyIntent.L4_ONLY):
+            if ep.intent != PolicyIntent.READ_ONLY:
                 continue
 
             for port in ep.effective_ports:
