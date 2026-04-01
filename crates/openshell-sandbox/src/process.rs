@@ -34,6 +34,25 @@ fn scrub_sensitive_env(cmd: &mut Command) {
     cmd.env_remove(SSH_HANDSHAKE_SECRET_ENV);
 }
 
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "haiku",
+    target_os = "redox"
+)))]
+fn has_gpu_devices() -> bool {
+    const GPU_DEVICE_PATHS: &[&str] = &[
+        "/dev/nvidiactl",
+        "/dev/nvidia-uvm",
+        "/dev/nvidia-uvm-tools",
+        "/dev/nvidia-modeset",
+        "/dev/nvmap",
+    ];
+    GPU_DEVICE_PATHS
+        .iter()
+        .any(|path| std::path::Path::new(path).exists())
+}
+
 /// Handle to a running process.
 pub struct ProcessHandle {
     child: Child,
@@ -414,26 +433,33 @@ pub fn drop_privileges(policy: &SandboxPolicy) -> Result<()> {
             target_os = "redox"
         )))]
         {
+            let preserve_gpu_groups = has_gpu_devices();
             // Snapshot the container-level supplemental GIDs (e.g. injected by
             // CDI for GPU device access) before initgroups replaces them.
             // Exclude GID 0 (root) to avoid inadvertent privilege retention.
             let root_gid = nix::unistd::Gid::from_raw(0);
-            let container_gids: Vec<nix::unistd::Gid> = nix::unistd::getgroups()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|&g| g != root_gid)
-                .collect();
+            let container_gids: Vec<nix::unistd::Gid> = if preserve_gpu_groups {
+                nix::unistd::getgroups()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|&g| g != root_gid)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             nix::unistd::initgroups(user_cstr.as_c_str(), group.gid).into_diagnostic()?;
-            // Merge back any CDI-injected GIDs that initgroups dropped so that
-            // exec'd processes retain access to GPU devices (e.g. /dev/nvmap on
-            // Tegra requires the video GID).
-            let mut merged: Vec<nix::unistd::Gid> = nix::unistd::getgroups().unwrap_or_default();
-            for gid in container_gids {
-                if !merged.contains(&gid) {
-                    merged.push(gid);
+            if preserve_gpu_groups {
+                // Merge back CDI-injected GIDs that initgroups dropped so that
+                // exec'd processes retain access to GPU devices.
+                let mut merged: Vec<nix::unistd::Gid> =
+                    nix::unistd::getgroups().unwrap_or_default();
+                for gid in container_gids {
+                    if !merged.contains(&gid) {
+                        merged.push(gid);
+                    }
                 }
+                nix::unistd::setgroups(&merged).into_diagnostic()?;
             }
-            nix::unistd::setgroups(&merged).into_diagnostic()?;
         }
     }
 
@@ -626,6 +652,28 @@ mod tests {
         assert!(
             msg.contains("not found"),
             "expected 'not found' in error: {msg}"
+        );
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "haiku",
+        target_os = "redox"
+    )))]
+    #[test]
+    fn has_gpu_devices_detects_present_nodes() {
+        assert_eq!(
+            has_gpu_devices(),
+            [
+                "/dev/nvidiactl",
+                "/dev/nvidia-uvm",
+                "/dev/nvidia-uvm-tools",
+                "/dev/nvidia-modeset",
+                "/dev/nvmap",
+            ]
+            .iter()
+            .any(|path| std::path::Path::new(path).exists())
         );
     }
 
