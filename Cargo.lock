@@ -3068,7 +3068,7 @@ dependencies = [
  "openshell-policy",
  "owo-colors",
  "serde",
- "serde_yaml",
+ "serde_yml",
  "thiserror 2.0.18",
  "tracing",
  "z3",
