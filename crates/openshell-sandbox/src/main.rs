@@ -163,11 +163,13 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Get command - either from CLI args, environment variable, or default to /bin/bash
+    // Get command - prefer CLI args (delivered via K8s container `args` which
+    // preserves argument boundaries exactly), then fall back to the
+    // OPENSHELL_SANDBOX_COMMAND env var (always `sleep infinity` when set by
+    // the server), then `/bin/bash` as a last resort.
     let command = if !args.command.is_empty() {
         args.command
     } else if let Ok(c) = std::env::var("OPENSHELL_SANDBOX_COMMAND") {
-        // Simple shell-like splitting on whitespace
         c.split_whitespace().map(String::from).collect()
     } else {
         vec!["/bin/bash".to_string()]

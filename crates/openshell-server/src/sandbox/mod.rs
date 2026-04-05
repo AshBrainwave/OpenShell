@@ -1052,7 +1052,6 @@ fn sandbox_template_to_k8s(
         sandbox_id,
         sandbox_name,
         grpc_endpoint,
-        sandbox_command,
         ssh_listen_addr,
         ssh_handshake_secret,
         ssh_handshake_skew_secs,
@@ -1060,6 +1059,15 @@ fn sandbox_template_to_k8s(
     );
 
     container.insert("env".to_string(), serde_json::Value::Array(env));
+
+    // Pass the user's command as container args so it reaches the sandbox
+    // binary as argv elements (via clap's trailing_var_arg).  This preserves
+    // argument boundaries exactly — no shell interpretation, no whitespace
+    // splitting — because Kubernetes delivers `args` entries as separate
+    // argv strings to the process specified in `command`.
+    if !sandbox_command.is_empty() {
+        container.insert("args".to_string(), serde_json::json!(sandbox_command));
+    }
 
     // The sandbox process needs SYS_ADMIN (for seccomp filter installation and
     // network namespace creation), NET_ADMIN (for network namespace veth setup),
@@ -1184,7 +1192,6 @@ fn build_env_list(
     sandbox_id: &str,
     sandbox_name: &str,
     grpc_endpoint: &str,
-    sandbox_command: &[String],
     ssh_listen_addr: &str,
     ssh_handshake_secret: &str,
     ssh_handshake_skew_secs: u64,
@@ -1198,7 +1205,6 @@ fn build_env_list(
         sandbox_id,
         sandbox_name,
         grpc_endpoint,
-        sandbox_command,
         ssh_listen_addr,
         ssh_handshake_secret,
         ssh_handshake_skew_secs,
@@ -1221,7 +1227,6 @@ fn apply_required_env(
     sandbox_id: &str,
     sandbox_name: &str,
     grpc_endpoint: &str,
-    sandbox_command: &[String],
     ssh_listen_addr: &str,
     ssh_handshake_secret: &str,
     ssh_handshake_skew_secs: u64,
@@ -1230,14 +1235,12 @@ fn apply_required_env(
     upsert_env(env, "OPENSHELL_SANDBOX_ID", sandbox_id);
     upsert_env(env, "OPENSHELL_SANDBOX", sandbox_name);
     upsert_env(env, "OPENSHELL_ENDPOINT", grpc_endpoint);
-    // Use the user-provided command if present, otherwise fall back to
-    // `sleep infinity` so the sandbox pod stays alive for interactive SSH.
-    let command_value = if sandbox_command.is_empty() {
-        "sleep infinity".to_string()
-    } else {
-        sandbox_command.join(" ")
-    };
-    upsert_env(env, "OPENSHELL_SANDBOX_COMMAND", &command_value);
+    // Default fallback command so the sandbox pod stays alive for interactive
+    // SSH when no user command is provided.  When the user *does* supply a
+    // command it is delivered as K8s container `args` (preserving argument
+    // boundaries exactly) and the sandbox binary's clap parser picks it up
+    // from argv before ever consulting this env var.
+    upsert_env(env, "OPENSHELL_SANDBOX_COMMAND", "sleep infinity");
     if !ssh_listen_addr.is_empty() {
         upsert_env(env, "OPENSHELL_SSH_LISTEN_ADDR", ssh_listen_addr);
     }
@@ -1635,7 +1638,6 @@ mod tests {
             "sandbox-1",
             "my-sandbox",
             "https://endpoint:8080",
-            &[],
             "0.0.0.0:2222",
             "my-secret-value",
             300,
@@ -1655,14 +1657,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_required_env_uses_sleep_infinity_when_no_command() {
+    fn apply_required_env_always_sets_sleep_infinity() {
         let mut env = Vec::new();
         apply_required_env(
             &mut env,
             "sandbox-1",
             "my-sandbox",
             "https://endpoint:8080",
-            &[],
             "0.0.0.0:2222",
             "secret",
             300,
@@ -1676,33 +1677,89 @@ mod tests {
         assert_eq!(
             cmd_entry.get("value").and_then(|v| v.as_str()),
             Some("sleep infinity"),
-            "default sandbox command should be 'sleep infinity'"
+            "OPENSHELL_SANDBOX_COMMAND should always be 'sleep infinity' (user commands are delivered via K8s args)"
         );
     }
 
     #[test]
-    fn apply_required_env_uses_user_command_when_provided() {
-        let mut env = Vec::new();
-        apply_required_env(
-            &mut env,
-            "sandbox-1",
-            "my-sandbox",
-            "https://endpoint:8080",
-            &["python".to_string(), "app.py".to_string()],
+    fn user_command_delivered_as_container_args() {
+        let user_cmd = vec![
+            "python".to_string(),
+            "-c".to_string(),
+            "print('hello world')".to_string(),
+        ];
+        let pod_template = sandbox_template_to_k8s(
+            &SandboxTemplate::default(),
+            false,
+            "openshell/sandbox:latest",
+            "",
+            "sandbox-id",
+            "sandbox-name",
+            "https://gateway.example.com",
+            &user_cmd,
             "0.0.0.0:2222",
             "secret",
             300,
-            false,
+            &std::collections::HashMap::new(),
+            "",
+            "",
+            true,
         );
 
+        // The user command should appear as container args, preserving each
+        // argument as a separate element (no whitespace join/split).
+        let args = pod_template["spec"]["containers"][0]["args"]
+            .as_array()
+            .expect("container args should be set when user provides a command");
+        assert_eq!(
+            args,
+            &[
+                serde_json::json!("python"),
+                serde_json::json!("-c"),
+                serde_json::json!("print('hello world')"),
+            ],
+            "args must preserve argument boundaries exactly"
+        );
+
+        // The env var should still be sleep infinity (fallback only).
+        let env = pod_template["spec"]["containers"][0]["env"]
+            .as_array()
+            .expect("env should exist");
         let cmd_entry = env
             .iter()
             .find(|e| e.get("name").and_then(|v| v.as_str()) == Some("OPENSHELL_SANDBOX_COMMAND"))
-            .expect("OPENSHELL_SANDBOX_COMMAND must be present in env");
+            .expect("OPENSHELL_SANDBOX_COMMAND must be present");
         assert_eq!(
             cmd_entry.get("value").and_then(|v| v.as_str()),
-            Some("python app.py"),
-            "sandbox command should reflect user-provided command"
+            Some("sleep infinity"),
+            "env var should be sleep infinity even when user command is provided"
+        );
+    }
+
+    #[test]
+    fn no_container_args_when_command_empty() {
+        let pod_template = sandbox_template_to_k8s(
+            &SandboxTemplate::default(),
+            false,
+            "openshell/sandbox:latest",
+            "",
+            "sandbox-id",
+            "sandbox-name",
+            "https://gateway.example.com",
+            &[],
+            "0.0.0.0:2222",
+            "secret",
+            300,
+            &std::collections::HashMap::new(),
+            "",
+            "",
+            true,
+        );
+
+        // No args should be set when the user didn't provide a command.
+        assert!(
+            pod_template["spec"]["containers"][0]["args"].is_null(),
+            "container args should not be set when no user command is provided"
         );
     }
 
@@ -1818,7 +1875,6 @@ mod tests {
             "sandbox-1",
             "my-sandbox",
             "https://endpoint:8080",
-            &[],
             "0.0.0.0:2222",
             "secret",
             300,
