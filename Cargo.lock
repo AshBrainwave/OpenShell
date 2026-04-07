@@ -245,7 +245,7 @@ dependencies = [
 name = "aws-lc-sys"
 version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83a25cf98105baa966497416dbd42565ce3a8cf8dbfd59803ec9ad46f3126399" da57ba3a (feat(vm): add openshell-vm crate with libkrun microVM gateway)
+checksum = "83a25cf98105baa966497416dbd42565ce3a8cf8dbfd59803ec9ad46f3126399"
 dependencies = [
  "cc",
  "cmake",
