@@ -16,7 +16,7 @@
 # When --vm-port is omitted:
 #   1. Picks a random free host port
 #   2. Starts the VM with --name <auto> --port <random>:30051
-#   3. Waits for the gRPC port to become reachable
+#   3. Waits for the VM to fully bootstrap (mTLS certs + gRPC health)
 #   4. Verifies `openshell-vm exec` works
 #   5. Runs the Rust smoke test
 #   6. Tears down the VM
@@ -66,6 +66,7 @@ else
       kill "$VM_PID" 2>/dev/null || true
       wait "$VM_PID" 2>/dev/null || true
     fi
+    rm -f "${VM_LOG:-}" 2>/dev/null || true
   }
   trap cleanup EXIT
 
@@ -74,25 +75,37 @@ else
     export DYLD_FALLBACK_LIBRARY_PATH="${RUNTIME_DIR}${DYLD_FALLBACK_LIBRARY_PATH:+:${DYLD_FALLBACK_LIBRARY_PATH}}"
   fi
 
-  "${GATEWAY_BIN}" --name "${VM_NAME}" --port "${HOST_PORT}:${GUEST_PORT}" &
+  VM_LOG=$(mktemp /tmp/openshell-vm-e2e.XXXXXX.log)
+  "${GATEWAY_BIN}" --name "${VM_NAME}" --port "${HOST_PORT}:${GUEST_PORT}" 2>"${VM_LOG}" &
   VM_PID=$!
 
-  # ── Wait for gRPC port ─────────────────────────────────────────────
-  echo "Waiting for gRPC port ${HOST_PORT} (timeout ${TIMEOUT}s)..."
+  # ── Wait for full bootstrap (mTLS certs + gRPC health) ─────────────
+  # The VM prints "Ready [Xs total]" to stderr after bootstrap_gateway()
+  # stores mTLS certs and wait_for_gateway_ready() confirms the gRPC
+  # service is responding. Waiting only for TCP port reachability (nc -z)
+  # is insufficient because port forwarding is established before the
+  # mTLS certs are written, causing `openshell status` to fail.
+  echo "Waiting for VM bootstrap to complete (timeout ${TIMEOUT}s)..."
   elapsed=0
-  while ! nc -z 127.0.0.1 "${HOST_PORT}" 2>/dev/null; do
+  while ! grep -q "^Ready " "${VM_LOG}" 2>/dev/null; do
     if ! kill -0 "$VM_PID" 2>/dev/null; then
-      echo "ERROR: openshell-vm exited before gRPC port became reachable"
+      echo "ERROR: openshell-vm exited before becoming ready"
+      echo "VM log:"
+      cat "${VM_LOG}"
       exit 1
     fi
     if [ "$elapsed" -ge "$TIMEOUT" ]; then
-      echo "ERROR: openshell-vm gRPC port not reachable after ${TIMEOUT}s"
+      echo "ERROR: openshell-vm did not become ready after ${TIMEOUT}s"
+      echo "VM log:"
+      cat "${VM_LOG}"
       exit 1
     fi
     sleep 2
     elapsed=$((elapsed + 2))
   done
   echo "Gateway is ready (${elapsed}s)."
+  echo "VM log:"
+  cat "${VM_LOG}"
 fi
 
 # ── Exec into the VM (when instance name is known) ───────────────────

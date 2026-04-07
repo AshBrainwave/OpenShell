@@ -321,26 +321,13 @@ fi
 # Patch manifests for VM deployment constraints.
 HELMCHART="$K3S_MANIFESTS/openshell-helmchart.yaml"
 if [ -f "$HELMCHART" ]; then
-    # Use pre-loaded images — don't pull from registry.
+    # Use pre-loaded images and a tmp-backed database in the VM.
     sed -i 's|__IMAGE_PULL_POLICY__|IfNotPresent|g' "$HELMCHART"
-    sed -i 's|__SANDBOX_IMAGE_PULL_POLICY__|IfNotPresent|g' "$HELMCHART"
-
-    # Bridge CNI: pods use normal pod networking, not hostNetwork.
-    # The pre-init in build-rootfs.sh replaces __HOST_NETWORK__ with "true"
-    # for Docker container networking. At VM boot with bridge CNI we need
-    # to override it back to "false" so pods use the CNI bridge network.
-    sed -i 's|hostNetwork: true|hostNetwork: false|g' "$HELMCHART"
-    sed -i 's|__HOST_NETWORK__|false|g' "$HELMCHART"
-    sed -i 's|__AUTOMOUNT_SA_TOKEN__|true|g' "$HELMCHART"
-
-    sed -i 's|__PERSISTENCE_ENABLED__|false|g' "$HELMCHART"
+    sed -i 's|__SANDBOX_IMAGE_PULL_POLICY__|"IfNotPresent"|g' "$HELMCHART"
     sed -i 's|__DB_URL__|"sqlite:/tmp/openshell.db"|g' "$HELMCHART"
     # Clear SSH gateway placeholders (default 127.0.0.1 is correct for local VM).
     sed -i 's|sshGatewayHost: __SSH_GATEWAY_HOST__|sshGatewayHost: ""|g' "$HELMCHART"
     sed -i 's|sshGatewayPort: __SSH_GATEWAY_PORT__|sshGatewayPort: 0|g' "$HELMCHART"
-    # Generate a random SSH handshake secret for this boot.
-    SSH_SECRET=$(head -c 32 /dev/urandom | od -A n -t x1 | tr -d ' \n')
-    sed -i "s|__SSH_HANDSHAKE_SECRET__|${SSH_SECRET}|g" "$HELMCHART"
     sed -i 's|__DISABLE_GATEWAY_AUTH__|false|g' "$HELMCHART"
     sed -i 's|__DISABLE_TLS__|false|g' "$HELMCHART"
     sed -i 's|hostGatewayIP: __HOST_GATEWAY_IP__|hostGatewayIP: ""|g' "$HELMCHART"
@@ -561,6 +548,15 @@ else
     ts "existing PKI found, skipping generation"
 fi
 
+SSH_HANDSHAKE_SECRET_FILE="${PKI_DIR}/ssh-handshake-secret"
+if [ ! -f "$SSH_HANDSHAKE_SECRET_FILE" ]; then
+    ts "generating SSH handshake secret (first boot)..."
+    head -c 32 /dev/urandom | od -A n -t x1 | tr -d ' \n' > "$SSH_HANDSHAKE_SECRET_FILE"
+    chmod 600 "$SSH_HANDSHAKE_SECRET_FILE"
+else
+    ts "existing SSH handshake secret found, reusing"
+fi
+
 # Write TLS secrets as a k3s auto-deploy manifest. k3s applies any YAML
 # in server/manifests/ on startup. We write this on every boot so that:
 #   - A --reset (which wipes the kine DB and server/ tree) gets secrets re-applied.
@@ -574,6 +570,7 @@ SERVER_CRT_B64=$(base64 -w0 < "$PKI_DIR/server.crt")
 SERVER_KEY_B64=$(base64 -w0 < "$PKI_DIR/server.key")
 CLIENT_CRT_B64=$(base64 -w0 < "$PKI_DIR/client.crt")
 CLIENT_KEY_B64=$(base64 -w0 < "$PKI_DIR/client.key")
+SSH_HANDSHAKE_SECRET_B64=$(base64 -w0 < "$SSH_HANDSHAKE_SECRET_FILE")
 
 cat > "$K3S_MANIFESTS/openshell-tls-secrets.yaml" <<EOTLS
 ---
@@ -611,6 +608,15 @@ data:
   tls.crt: "${CLIENT_CRT_B64}"
   tls.key: "${CLIENT_KEY_B64}"
   ca.crt: "${CA_CRT_B64}"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openshell-ssh-handshake
+  namespace: openshell
+type: Opaque
+data:
+  secret: "${SSH_HANDSHAKE_SECRET_B64}"
 EOTLS
 ts "TLS secrets manifest written"
 

@@ -95,6 +95,7 @@ pub struct LibKrun {
     pub krun_add_vsock: KrunAddVsock,
     #[cfg(target_os = "macos")]
     pub krun_add_net_unixgram: KrunAddNetUnixgram,
+    #[allow(dead_code)] // FFI symbol loaded for future use
     pub krun_add_net_unixstream: KrunAddNetUnixstream,
 }
 
@@ -187,7 +188,7 @@ fn preload_runtime_support_libraries(runtime_dir: &Path) -> Result<Vec<PathBuf>,
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .map(|name| {
+                .is_some_and(|name| {
                     #[cfg(target_os = "macos")]
                     {
                         name.starts_with("libkrunfw") && name.ends_with(".dylib")
@@ -197,7 +198,6 @@ fn preload_runtime_support_libraries(runtime_dir: &Path) -> Result<Vec<PathBuf>,
                         name.starts_with("libkrunfw") && name.contains(".so")
                     }
                 })
-                .unwrap_or(false)
         })
         .collect();
 

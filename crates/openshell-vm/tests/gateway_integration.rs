@@ -58,7 +58,7 @@ fn assert_runtime_bundle_staged() {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-/// Boot the full OpenShell gateway and verify the gRPC service becomes
+/// Boot the full `OpenShell` gateway and verify the gRPC service becomes
 /// reachable on port 30051.
 #[test]
 #[ignore] // requires libkrun + rootfs

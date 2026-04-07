@@ -92,9 +92,9 @@ pub fn ensure_runtime_extracted() -> Result<PathBuf, VmError> {
     let version_marker = cache_dir.join(".version");
 
     // Check if already extracted with correct version
-    if version_marker.exists() {
-        if let Ok(cached_version) = fs::read_to_string(&version_marker) {
-            if cached_version.trim() == VERSION {
+    if version_marker.exists()
+        && let Ok(cached_version) = fs::read_to_string(&version_marker)
+            && cached_version.trim() == VERSION {
                 // Validate files exist
                 if validate_runtime_dir(&cache_dir).is_ok() {
                     tracing::debug!(
@@ -104,8 +104,6 @@ pub fn ensure_runtime_extracted() -> Result<PathBuf, VmError> {
                     return Ok(cache_dir);
                 }
             }
-        }
-    }
 
     // Clean up old versions before extracting new one
     cleanup_old_versions(&cache_dir)?;
@@ -174,17 +172,15 @@ pub fn extract_rootfs_to(dest: &Path) -> Result<(), VmError> {
     let version_marker = dest.join(".version");
 
     // Already extracted with the correct version — nothing to do.
-    if version_marker.exists() {
-        if let Ok(cached_version) = fs::read_to_string(&version_marker) {
-            if cached_version.trim() == VERSION {
+    if version_marker.exists()
+        && let Ok(cached_version) = fs::read_to_string(&version_marker)
+            && cached_version.trim() == VERSION {
                 tracing::debug!(
                     path = %dest.display(),
                     "Using cached rootfs"
                 );
                 return Ok(());
             }
-        }
-    }
 
     // Remove existing if present (version mismatch or incomplete extraction).
     if dest.exists() {

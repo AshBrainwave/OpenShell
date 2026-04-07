@@ -476,37 +476,20 @@ if [ -f "$HELMCHART" ]; then
     # Use local images — explicitly imported into containerd.
     sed -i '' 's|__IMAGE_PULL_POLICY__|IfNotPresent|g' "$HELMCHART" 2>/dev/null \
         || sed -i 's|__IMAGE_PULL_POLICY__|IfNotPresent|g' "$HELMCHART"
-    sed -i '' 's|__SANDBOX_IMAGE_PULL_POLICY__|IfNotPresent|g' "$HELMCHART" 2>/dev/null \
-        || sed -i 's|__SANDBOX_IMAGE_PULL_POLICY__|IfNotPresent|g' "$HELMCHART"
+    sed -i '' 's|__SANDBOX_IMAGE_PULL_POLICY__|"IfNotPresent"|g' "$HELMCHART" 2>/dev/null \
+        || sed -i 's|__SANDBOX_IMAGE_PULL_POLICY__|"IfNotPresent"|g' "$HELMCHART"
+    sed -i '' 's|__DB_URL__|"sqlite:/tmp/openshell.db"|g' "$HELMCHART" 2>/dev/null \
+        || sed -i 's|__DB_URL__|"sqlite:/tmp/openshell.db"|g' "$HELMCHART"
     # Use the locally imported image references.
     sed -i '' -E "s|repository:[[:space:]]*[^[:space:]]+|repository: ${SERVER_IMAGE%:*}|" "$HELMCHART" 2>/dev/null \
         || sed -i -E "s|repository:[[:space:]]*[^[:space:]]+|repository: ${SERVER_IMAGE%:*}|" "$HELMCHART"
     sed -i '' -E "s|tag:[[:space:]]*\"?[^\"[:space:]]+\"?|tag: \"${IMAGE_TAG}\"|" "$HELMCHART" 2>/dev/null \
         || sed -i -E "s|tag:[[:space:]]*\"?[^\"[:space:]]+\"?|tag: \"${IMAGE_TAG}\"|" "$HELMCHART"
-    # Bridge CNI: pods use normal pod networking, not hostNetwork.
-    # This must match what openshell-vm-init.sh applies at runtime so the
-    # HelmChart manifest is unchanged at boot — preventing a helm
-    # upgrade job that would cycle the pre-baked pod.
-    sed -i '' 's|__HOST_NETWORK__|false|g' "$HELMCHART" 2>/dev/null \
-        || sed -i 's|__HOST_NETWORK__|false|g' "$HELMCHART"
-    # Enable SA token automount for bridge CNI mode. Must match
-    # openshell-vm-init.sh runtime value to avoid manifest delta.
-    sed -i '' 's|__AUTOMOUNT_SA_TOKEN__|true|g' "$HELMCHART" 2>/dev/null \
-        || sed -i 's|__AUTOMOUNT_SA_TOKEN__|true|g' "$HELMCHART"
-    # Disable persistence — use /tmp for the SQLite database. PVC mounts
-    # are unreliable on virtiofs.
-    sed -i '' 's|__PERSISTENCE_ENABLED__|false|g' "$HELMCHART" 2>/dev/null \
-        || sed -i 's|__PERSISTENCE_ENABLED__|false|g' "$HELMCHART"
-    sed -i '' 's|__DB_URL__|"sqlite:/tmp/openshell.db"|g' "$HELMCHART" 2>/dev/null \
-        || sed -i 's|__DB_URL__|"sqlite:/tmp/openshell.db"|g' "$HELMCHART"
     # Clear SSH gateway placeholders.
     sed -i '' 's|sshGatewayHost: __SSH_GATEWAY_HOST__|sshGatewayHost: ""|g' "$HELMCHART" 2>/dev/null \
         || sed -i 's|sshGatewayHost: __SSH_GATEWAY_HOST__|sshGatewayHost: ""|g' "$HELMCHART"
     sed -i '' 's|sshGatewayPort: __SSH_GATEWAY_PORT__|sshGatewayPort: 0|g' "$HELMCHART" 2>/dev/null \
         || sed -i 's|sshGatewayPort: __SSH_GATEWAY_PORT__|sshGatewayPort: 0|g' "$HELMCHART"
-    SSH_HANDSHAKE_SECRET="$(head -c 32 /dev/urandom | od -A n -t x1 | tr -d ' \n')"
-    sed -i '' "s|__SSH_HANDSHAKE_SECRET__|${SSH_HANDSHAKE_SECRET}|g" "$HELMCHART" 2>/dev/null \
-        || sed -i "s|__SSH_HANDSHAKE_SECRET__|${SSH_HANDSHAKE_SECRET}|g" "$HELMCHART"
     sed -i '' 's|__DISABLE_GATEWAY_AUTH__|false|g' "$HELMCHART" 2>/dev/null \
         || sed -i 's|__DISABLE_GATEWAY_AUTH__|false|g' "$HELMCHART"
     sed -i '' 's|__DISABLE_TLS__|false|g' "$HELMCHART" 2>/dev/null \
@@ -552,9 +535,9 @@ if [ -f "$AGENT_MANIFEST" ]; then
     fi
 fi
 
-# local-storage implies local-path-provisioner, which requires CNI bridge
-# networking that is unavailable in the VM kernel.
-rm -f "${INIT_MANIFESTS}/local-storage.yaml" 2>/dev/null || true
+# local-path-provisioner (deployed by k3s from local-storage.yaml) provides
+# PVC storage for sandbox workspace volumes. It requires CNI bridge
+# networking, which is now available in the VM kernel.
 
 # ── Pre-initialize using the actual libkrun VM ──────────────────────────
 # Boot the real VM with the rootfs we just built. This uses the same

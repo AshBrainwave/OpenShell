@@ -216,15 +216,15 @@ pub fn reset_runtime_state(rootfs: &Path, gateway_name: &str) -> Result<(), VmEr
     Ok(())
 }
 
-/// Remove a corrupt kine (SQLite) database so k3s can recreate it on boot.
+/// Remove a corrupt kine (`SQLite`) database so k3s can recreate it on boot.
 ///
-/// k3s uses kine with a SQLite backend at `var/lib/rancher/k3s/server/db/state.db`.
+/// k3s uses kine with a `SQLite` backend at `var/lib/rancher/k3s/server/db/state.db`.
 /// If the VM is killed mid-write (SIGKILL, host crash, power loss), the database
-/// file may be left in a corrupt state — the SQLite header magic is missing or the
+/// file may be left in a corrupt state — the `SQLite` header magic is missing or the
 /// file is truncated. k3s would open the DB, get `SQLITE_NOTADB` /
 /// `SQLITE_CORRUPT`, and crash at startup.
 ///
-/// This function checks the SQLite file header (first 100 bytes only) and removes
+/// This function checks the `SQLite` file header (first 100 bytes only) and removes
 /// the database plus its WAL/SHM sidecar files if the header is invalid. k3s will
 /// create a fresh database on startup and cluster state will be re-applied from
 /// the auto-deploy manifests in `server/manifests/`.
@@ -237,7 +237,7 @@ pub fn reset_runtime_state(rootfs: &Path, gateway_name: &str) -> Result<(), VmEr
 /// survive normal restarts.
 ///
 /// **What is lost on corruption:** all cluster object records (Pods, Deployments,
-/// Secrets, ConfigMaps, CRDs, etc.) and the bootstrap token. These are re-created
+/// Secrets, `ConfigMaps`, CRDs, etc.) and the bootstrap token. These are re-created
 /// from manifests on the next boot.
 ///
 /// **What is always preserved:** container images and snapshots (under
@@ -257,8 +257,7 @@ pub fn recover_corrupt_kine_db(rootfs: &Path) -> Result<(), VmError> {
 
     // Read only the first 100 bytes (the minimum valid SQLite header size)
     // instead of loading the entire database into memory.
-    use std::io::Read;
-    let has_invalid_header = match fs::File::open(&db_path).and_then(|mut f| {
+    let has_invalid_header = match File::open(&db_path).and_then(|mut f| {
         let mut buf = [0u8; 100];
         let n = f.read(&mut buf)?;
         Ok((n, buf))
@@ -282,7 +281,7 @@ pub fn recover_corrupt_kine_db(rootfs: &Path) -> Result<(), VmError> {
     Ok(())
 }
 
-/// Remove the kine SQLite database and its WAL/SHM sidecar files.
+/// Remove the kine `SQLite` database and its WAL/SHM sidecar files.
 fn remove_kine_db_files(db_path: &Path) -> Result<(), VmError> {
     if let Err(e) = fs::remove_file(db_path) {
         return Err(VmError::RuntimeState(format!(

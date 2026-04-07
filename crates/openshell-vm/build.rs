@@ -4,13 +4,13 @@
 //! Build script for openshell-vm.
 //!
 //! This script copies pre-compressed VM runtime artifacts (libkrun, libkrunfw,
-//! gvproxy) to OUT_DIR for embedding via `include_bytes!()`.
+//! gvproxy) to `OUT_DIR` for embedding via `include_bytes!()`.
 //!
 //! The compressed artifacts are expected to be prepared by:
 //!   `mise run vm:runtime:compress`
 //!
 //! Environment:
-//!   OPENSHELL_VM_RUNTIME_COMPRESSED_DIR - Path to compressed artifacts
+//!   `OPENSHELL_VM_RUNTIME_COMPRESSED_DIR` - Path to compressed artifacts
 
 use std::path::PathBuf;
 use std::{env, fs};
@@ -43,8 +43,7 @@ fn main() {
         "linux" => ("libkrun.so", "libkrunfw.so.5"),
         _ => {
             println!(
-                "cargo:warning=VM runtime not available for {}-{}",
-                target_os, target_arch
+                "cargo:warning=VM runtime not available for {target_os}-{target_arch}"
             );
             generate_stub_resources(&out_dir);
             return;
@@ -52,14 +51,11 @@ fn main() {
     };
 
     // Check for pre-compressed artifacts from mise task
-    let compressed_dir = match env::var("OPENSHELL_VM_RUNTIME_COMPRESSED_DIR") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => {
-            println!("cargo:warning=OPENSHELL_VM_RUNTIME_COMPRESSED_DIR not set");
-            println!("cargo:warning=Run: mise run vm:runtime:compress");
-            generate_stub_resources(&out_dir);
-            return;
-        }
+    let compressed_dir = if let Ok(dir) = env::var("OPENSHELL_VM_RUNTIME_COMPRESSED_DIR") { PathBuf::from(dir) } else {
+        println!("cargo:warning=OPENSHELL_VM_RUNTIME_COMPRESSED_DIR not set");
+        println!("cargo:warning=Run: mise run vm:runtime:compress");
+        generate_stub_resources(&out_dir);
+        return;
     };
 
     if !compressed_dir.is_dir() {
@@ -102,7 +98,7 @@ fn main() {
                 )
             });
             let size = fs::metadata(&dst_path).map(|m| m.len()).unwrap_or(0);
-            println!("cargo:warning=Embedded {}: {} bytes", src_name, size);
+            println!("cargo:warning=Embedded {src_name}: {size} bytes");
         } else {
             println!(
                 "cargo:warning=Missing compressed artifact: {}",

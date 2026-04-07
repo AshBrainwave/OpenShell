@@ -169,8 +169,8 @@ impl VmConfig {
     /// Default gateway configuration: boots k3s server inside the VM.
     ///
     /// Runs `/srv/openshell-vm-init.sh` which mounts essential filesystems,
-    /// deploys the OpenShell helm chart, and execs `k3s server`.
-    /// Exposes the OpenShell gateway on port 30051.
+    /// deploys the `OpenShell` helm chart, and execs `k3s server`.
+    /// Exposes the `OpenShell` gateway on port 30051.
     pub fn gateway(rootfs: PathBuf) -> Self {
         Self {
             vsock_ports: vec![VsockPort {
@@ -440,7 +440,7 @@ fn raise_nofile_limit() {
         };
         if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rlim) == 0 {
             rlim.rlim_cur = rlim.rlim_max;
-            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &raw const rlim);
         }
     }
 }
@@ -456,9 +456,7 @@ fn log_runtime_provenance(runtime_dir: &Path) {
         eprintln!("  libkrun: {}", prov.libkrun_path.display());
         for krunfw in &prov.libkrunfw_paths {
             let name = krunfw
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+                .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string());
             eprintln!("  libkrunfw: {name}");
         }
         if let Some(ref sha) = prov.libkrunfw_sha256 {
@@ -604,6 +602,7 @@ impl VmContext {
         }
     }
 
+    #[allow(dead_code)] // FFI binding for future use (e.g. Linux networking)
     fn add_net_unixstream(
         &self,
         socket_path: &Path,
@@ -1283,10 +1282,10 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
 
 // ── Post-boot bootstrap ────────────────────────────────────────────────
 
-/// Default gateway port: host port mapped to the OpenShell `NodePort` (30051).
+/// Default gateway port: host port mapped to the `OpenShell` `NodePort` (30051).
 const DEFAULT_GATEWAY_PORT: u16 = 30051;
 
-/// Bootstrap the OpenShell control plane after k3s is ready.
+/// Bootstrap the `OpenShell` control plane after k3s is ready.
 ///
 /// All operations use the virtio-fs rootfs — no kubectl or API server
 /// port forwarding required. This avoids exposing port 6443 outside the
@@ -1353,11 +1352,10 @@ fn bootstrap_gateway(rootfs: &Path, gateway_name: &str, gateway_port: u16) -> Re
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        if ca_cert_path.is_file() {
-            if let Err(e) = sync_host_certs_if_stale(&pki_dir, gateway_name) {
+        if ca_cert_path.is_file()
+            && let Err(e) = sync_host_certs_if_stale(&pki_dir, gateway_name) {
                 eprintln!("Warning: cert sync check failed: {e}");
             }
-        }
 
         eprintln!(
             "Warm boot [{:.1}s]",
@@ -1383,11 +1381,10 @@ fn bootstrap_gateway(rootfs: &Path, gateway_name: &str, gateway_port: u16) -> Re
     loop {
         if ca_cert_path.is_file() {
             // Verify the file has content (not a partial write).
-            if let Ok(m) = std::fs::metadata(&ca_cert_path) {
-                if m.len() > 0 {
+            if let Ok(m) = std::fs::metadata(&ca_cert_path)
+                && m.len() > 0 {
                     break;
                 }
-            }
         }
         if poll_start.elapsed() >= poll_timeout {
             return Err(VmError::Bootstrap(

@@ -3,7 +3,7 @@
 
 //! Standalone openshell-vm binary.
 //!
-//! Boots a libkrun microVM running the OpenShell control plane (k3s +
+//! Boots a libkrun microVM running the `OpenShell` control plane (k3s +
 //! openshell-server). Each named instance gets its own rootfs extracted from
 //! the embedded tarball at
 //! `~/.local/share/openshell/openshell-vm/{version}/instances/<name>/rootfs`.
@@ -22,10 +22,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueHint};
 
-/// Boot the OpenShell gateway microVM.
+/// Boot the `OpenShell` gateway microVM.
 ///
 /// Starts a libkrun microVM running a k3s Kubernetes cluster with the
-/// OpenShell control plane. Use `--exec` to run a custom process instead.
+/// `OpenShell` control plane. Use `--exec` to run a custom process instead.
 #[derive(Parser)]
 #[command(name = "openshell-vm", version)]
 struct Cli {
@@ -169,9 +169,7 @@ fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     };
 
     let rootfs = cli
-        .rootfs
-        .map(Ok)
-        .unwrap_or_else(|| openshell_vm::ensure_named_rootfs(&cli.name))?;
+        .rootfs.map_or_else(|| openshell_vm::ensure_named_rootfs(&cli.name), Ok)?;
 
     let gateway_name = openshell_vm::gateway_name(&cli.name)?;
 
@@ -188,7 +186,7 @@ fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             vsock_ports: vec![],
             log_level: cli.krun_log_level,
             console_output: None,
-            net: net_backend.clone(),
+            net: net_backend,
             reset: cli.reset,
             gateway_name,
         }
