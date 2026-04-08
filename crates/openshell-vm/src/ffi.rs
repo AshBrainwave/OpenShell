@@ -41,8 +41,9 @@ pub const KRUN_LOG_LEVEL_TRACE: u32 = 5;
 pub const KRUN_LOG_STYLE_AUTO: u32 = 0;
 pub const KRUN_LOG_OPTION_NO_ENV: u32 = 1;
 pub const KRUN_DISK_FORMAT_RAW: u32 = 0;
+#[allow(dead_code)] // Used only on macOS (cfg-gated in state_disk_sync_mode)
 pub const KRUN_SYNC_RELAXED: u32 = 1;
-#[allow(dead_code)]
+#[allow(dead_code)] // Used only on Linux (cfg-gated in state_disk_sync_mode)
 pub const KRUN_SYNC_FULL: u32 = 2;
 
 type KrunInitLog =
