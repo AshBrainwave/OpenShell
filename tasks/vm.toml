@@ -12,8 +12,6 @@ description = "Build and run the standalone openshell-vm microVM"
 depends = ["build:docker:gateway"]
 run = [
   "mise run vm:build:embedded",
-  "tasks/scripts/vm/ensure-vm-rootfs.sh",
-  "tasks/scripts/vm/sync-vm-rootfs.sh",
   "tasks/scripts/vm/run-vm.sh",
 ]
 hide = false
@@ -80,7 +78,7 @@ hide = false
 # ═══════════════════════════════════════════════════════════════════════════
 
 ["vm:rootfs"]
-description = "Build the default openshell-vm rootfs if needed"
+description = "Prepare the default named openshell-vm rootfs if needed"
 run = "tasks/scripts/vm/ensure-vm-rootfs.sh"
 hide = true
 

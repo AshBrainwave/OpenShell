@@ -831,13 +831,18 @@ fn apply_workspace_persistence(
         // read the image's original /sandbox contents.  It copies them into
         // the PVC only when the sentinel file is absent.
         //
+        // Prefer a tar stream over `cp -a`: some sandbox images contain
+        // self-referential symlinks under `/sandbox/.uv`, and GNU cp can
+        // fail while seeding the PVC even though preserving the symlink as-is
+        // is valid. `tar` copies the tree without dereferencing those links.
+        //
         // The inner `[ -d ... ]` guard handles custom images that don't have
         // a /sandbox directory — the copy is skipped but the sentinel is
         // still written so subsequent starts are instant.
         let copy_cmd = format!(
             "if [ ! -f {WORKSPACE_INIT_MOUNT_PATH}/{WORKSPACE_SENTINEL} ]; then \
                if [ -d {WORKSPACE_MOUNT_PATH} ]; then \
-                 cp -a {WORKSPACE_MOUNT_PATH}/. {WORKSPACE_INIT_MOUNT_PATH}/; \
+                 tar -C {WORKSPACE_MOUNT_PATH} -cf - . | tar -C {WORKSPACE_INIT_MOUNT_PATH} -xpf -; \
                fi && \
                touch {WORKSPACE_INIT_MOUNT_PATH}/{WORKSPACE_SENTINEL}; \
              fi"
@@ -2124,8 +2129,8 @@ mod tests {
             "init script must check for sentinel file"
         );
         assert!(
-            script.contains("cp -a"),
-            "init script must copy image contents"
+            script.contains("tar -C"),
+            "init script must seed image contents with a tar stream"
         );
     }
 

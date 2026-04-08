@@ -22,6 +22,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueHint};
 
+const DISABLE_STATE_DISK_ENV: &str = "OPENSHELL_VM_DISABLE_STATE_DISK";
+
 /// Boot the `OpenShell` gateway microVM.
 ///
 /// Starts a libkrun microVM running a k3s Kubernetes cluster with the
@@ -39,11 +41,13 @@ struct Cli {
 
     /// Named VM instance.
     ///
-    /// The rootfs resolves to
-    /// `~/.local/share/openshell/openshell-vm/{version}/instances/<name>/rootfs`.
-    /// Each instance gets its own rootfs extracted from the embedded tarball
-    /// on first use.
-    #[arg(long, default_value = "default", conflicts_with = "rootfs")]
+    /// When used alone, the rootfs resolves to
+    /// `~/.local/share/openshell/openshell-vm/{version}/instances/<name>/rootfs`
+    /// and is extracted from the embedded tarball on first use.
+    /// When combined with `--rootfs`, only provides the instance identity
+    /// (for exec, gateway name, etc.) while the rootfs comes from the
+    /// explicit path.
+    #[arg(long, default_value = "default")]
     name: String,
 
     /// Executable path inside the VM. When set, runs this instead of
@@ -92,6 +96,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum GatewayCommand {
+    /// Ensure the target rootfs exists, extracting the embedded rootfs if needed.
+    PrepareRootfs {
+        /// Recreate the target rootfs even if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Execute a command inside a running openshell-vm VM.
     Exec {
         /// Working directory inside the VM.
@@ -127,6 +138,12 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
+    if let Some(GatewayCommand::PrepareRootfs { force }) = &cli.command {
+        let rootfs = openshell_vm::prepare_rootfs(cli.rootfs.clone(), &cli.name, *force)?;
+        println!("{}", rootfs.display());
+        return Ok(0);
+    }
+
     if let Some(GatewayCommand::Exec {
         workdir,
         env,
@@ -169,7 +186,8 @@ fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     };
 
     let rootfs = cli
-        .rootfs.map_or_else(|| openshell_vm::ensure_named_rootfs(&cli.name), Ok)?;
+        .rootfs
+        .map_or_else(|| openshell_vm::ensure_named_rootfs(&cli.name), Ok)?;
 
     let gateway_name = openshell_vm::gateway_name(&cli.name)?;
 
@@ -189,6 +207,7 @@ fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             net: net_backend,
             reset: cli.reset,
             gateway_name,
+            state_disk: None,
         }
     } else {
         let mut c = openshell_vm::VmConfig::gateway(rootfs);
@@ -204,9 +223,19 @@ fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         c.net = net_backend;
         c.reset = cli.reset;
         c.gateway_name = gateway_name;
+        if state_disk_disabled() {
+            c.state_disk = None;
+        }
         c
     };
     config.log_level = cli.krun_log_level;
 
     Ok(openshell_vm::launch(&config)?)
+}
+
+fn state_disk_disabled() -> bool {
+    matches!(
+        std::env::var(DISABLE_STATE_DISK_ENV).ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }

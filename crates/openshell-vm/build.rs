@@ -42,16 +42,16 @@ fn main() {
         "macos" => ("libkrun.dylib", "libkrunfw.5.dylib"),
         "linux" => ("libkrun.so", "libkrunfw.so.5"),
         _ => {
-            println!(
-                "cargo:warning=VM runtime not available for {target_os}-{target_arch}"
-            );
+            println!("cargo:warning=VM runtime not available for {target_os}-{target_arch}");
             generate_stub_resources(&out_dir);
             return;
         }
     };
 
     // Check for pre-compressed artifacts from mise task
-    let compressed_dir = if let Ok(dir) = env::var("OPENSHELL_VM_RUNTIME_COMPRESSED_DIR") { PathBuf::from(dir) } else {
+    let compressed_dir = if let Ok(dir) = env::var("OPENSHELL_VM_RUNTIME_COMPRESSED_DIR") {
+        PathBuf::from(dir)
+    } else {
         println!("cargo:warning=OPENSHELL_VM_RUNTIME_COMPRESSED_DIR not set");
         println!("cargo:warning=Run: mise run vm:runtime:compress");
         generate_stub_resources(&out_dir);

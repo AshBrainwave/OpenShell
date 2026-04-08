@@ -24,6 +24,8 @@
 # Usage:
 #   ./build-rootfs.sh [--base] [--arch aarch64|x86_64] [output_dir]
 #
+# If output_dir is omitted, the rootfs is built under target/rootfs-build.
+#
 # Requires: Docker (or compatible container runtime), curl, helm
 # Full mode (default) also requires: zstd, sqlite3, a built openshell-vm binary
 
@@ -88,7 +90,9 @@ case "$GUEST_ARCH" in
         ;;
 esac
 
-DEFAULT_ROOTFS="${XDG_DATA_HOME:-${HOME}/.local/share}/openshell/openshell-vm/rootfs"
+# Project root (two levels up from crates/openshell-vm/scripts/)
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+DEFAULT_ROOTFS="${PROJECT_ROOT}/target/rootfs-build"
 ROOTFS_DIR="${POSITIONAL_ARGS[0]:-${DEFAULT_ROOTFS}}"
 CONTAINER_NAME="krun-rootfs-builder"
 BASE_IMAGE_TAG="krun-rootfs:openshell-vm"
@@ -97,9 +101,6 @@ BASE_IMAGE_TAG="krun-rootfs:openshell-vm"
 # normalise to "+" so the GitHub download URL works.
 K3S_VERSION="${K3S_VERSION:-v1.35.2+k3s1}"
 K3S_VERSION="${K3S_VERSION//-k3s/+k3s}"
-
-# Project root (two levels up from crates/openshell-vm/scripts/)
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 # Container images to pre-load into k3s (full mode only).
 # AGENT_SANDBOX_IMAGE and COMMUNITY_SANDBOX_IMAGE are digest-pinned in pins.env.
@@ -228,11 +229,13 @@ FROM ${BASE_IMAGE}
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
+        e2fsprogs \
         iptables \
         iproute2 \
         python3 \
         busybox-static \
         sqlite3 \
+        util-linux \
         zstd \
     && rm -rf /var/lib/apt/lists/*
 # busybox-static provides udhcpc for DHCP inside the VM.
@@ -582,7 +585,9 @@ if [ "$(uname -s)" = "Darwin" ]; then
 else
     export LD_LIBRARY_PATH="${RUNTIME_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
-"${GATEWAY_BIN}" --rootfs "${ROOTFS_DIR}" --reset &
+# Pre-initialize directly on virtio-fs. Runtime boots attach a separate
+# block-backed state disk and seed it from the rootfs on first launch.
+OPENSHELL_VM_DISABLE_STATE_DISK=1 "${GATEWAY_BIN}" --rootfs "${ROOTFS_DIR}" --reset &
 VM_PID=$!
 
 # Ensure the VM is cleaned up on script exit.
@@ -657,8 +662,9 @@ for i in $(seq 1 180); do
 done
 
 # Pre-unpack container images so the overlayfs snapshotter has ready-to-use
-# snapshots on first boot. Without this, the first container create for each
-# image triggers a full layer extraction which can take minutes.
+# snapshots on first boot. The snapshotter now runs directly on virtio-fs,
+# so these unpacked layers persist across VM restarts — eliminating the
+# per-boot layer extraction that previously added ~3-5s per container.
 echo "    Pre-unpacking container images..."
 for img in \
     "ghcr.io/nvidia/openshell-community/sandboxes/base:latest" \

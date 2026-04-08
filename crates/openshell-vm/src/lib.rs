@@ -41,7 +41,7 @@ pub enum VmError {
 
     /// The rootfs directory does not exist.
     #[error(
-        "rootfs directory not found: {path}\nRun: ./crates/openshell-vm/scripts/build-rootfs.sh"
+        "rootfs directory not found: {path}\nRun `openshell-vm prepare-rootfs` or build one with ./crates/openshell-vm/scripts/build-rootfs.sh <output_dir>"
     )]
     RootfsNotFound { path: String },
 
@@ -116,6 +116,33 @@ pub struct VsockPort {
     pub listen: bool,
 }
 
+/// Host-backed raw block image attached to the VM for mutable guest state.
+#[derive(Debug, Clone)]
+pub struct StateDiskConfig {
+    /// Path to the sparse raw image on the host.
+    pub path: PathBuf,
+
+    /// Size of the raw image in bytes.
+    pub size_bytes: u64,
+
+    /// Guest-visible libkrun block ID.
+    pub block_id: String,
+
+    /// Guest device path used by the init script.
+    pub guest_device: String,
+}
+
+impl StateDiskConfig {
+    fn for_rootfs(rootfs: &Path) -> Self {
+        Self {
+            path: default_state_disk_path(rootfs),
+            size_bytes: DEFAULT_STATE_DISK_SIZE_BYTES,
+            block_id: DEFAULT_STATE_DISK_BLOCK_ID.to_string(),
+            guest_device: DEFAULT_STATE_DISK_GUEST_DEVICE.to_string(),
+        }
+    }
+}
+
 /// Configuration for a libkrun microVM.
 pub struct VmConfig {
     /// Path to the extracted rootfs directory (aarch64 Linux).
@@ -163,6 +190,9 @@ pub struct VmConfig {
 
     /// Gateway metadata name used for host-side config and mTLS material.
     pub gateway_name: String,
+
+    /// Optional host-backed raw block image for mutable guest state.
+    pub state_disk: Option<StateDiskConfig>,
 }
 
 impl VmConfig {
@@ -172,6 +202,7 @@ impl VmConfig {
     /// deploys the `OpenShell` helm chart, and execs `k3s server`.
     /// Exposes the `OpenShell` gateway on port 30051.
     pub fn gateway(rootfs: PathBuf) -> Self {
+        let state_disk = StateDiskConfig::for_rootfs(&rootfs);
         Self {
             vsock_ports: vec![VsockPort {
                 port: VM_EXEC_VSOCK_PORT,
@@ -204,12 +235,16 @@ impl VmConfig {
             },
             reset: false,
             gateway_name: format!("{GATEWAY_NAME_PREFIX}-default"),
+            state_disk: Some(state_disk),
         }
     }
 }
 
 /// Base prefix for gateway metadata names.
 const GATEWAY_NAME_PREFIX: &str = "openshell-vm";
+const DEFAULT_STATE_DISK_SIZE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const DEFAULT_STATE_DISK_BLOCK_ID: &str = "openshell-state";
+const DEFAULT_STATE_DISK_GUEST_DEVICE: &str = "/dev/vda";
 
 /// Resolve the gateway metadata name for an instance name.
 pub fn gateway_name(instance_name: &str) -> Result<String, VmError> {
@@ -253,6 +288,44 @@ pub fn ensure_named_rootfs(instance_name: &str) -> Result<PathBuf, VmError> {
 
     Err(VmError::RootfsNotFound {
         path: instance_rootfs.display().to_string(),
+    })
+}
+
+/// Ensure the requested rootfs exists, extracting the embedded rootfs when needed.
+///
+/// When `rootfs` is `None`, this uses the named-instance layout under
+/// `$XDG_DATA_HOME/openshell/openshell-vm/{version}/instances/<name>/rootfs`.
+/// When `force_recreate` is true and the target exists, it is removed first.
+pub fn prepare_rootfs(
+    rootfs: Option<PathBuf>,
+    instance_name: &str,
+    force_recreate: bool,
+) -> Result<PathBuf, VmError> {
+    let target = match rootfs {
+        Some(path) => path,
+        None => named_rootfs_dir(instance_name)?,
+    };
+
+    if force_recreate && target.exists() {
+        std::fs::remove_dir_all(&target).map_err(|e| {
+            VmError::HostSetup(format!("remove existing rootfs {}: {e}", target.display()))
+        })?;
+    }
+
+    if target.is_dir() {
+        return Ok(target);
+    }
+
+    if embedded::has_embedded_rootfs() {
+        if target == named_rootfs_dir(instance_name)? {
+            embedded::cleanup_old_rootfs()?;
+        }
+        embedded::extract_rootfs_to(&target)?;
+        return Ok(target);
+    }
+
+    Err(VmError::RootfsNotFound {
+        path: target.display().to_string(),
     })
 }
 
@@ -455,8 +528,10 @@ fn log_runtime_provenance(runtime_dir: &Path) {
         eprintln!("runtime: {}", runtime_dir.display());
         eprintln!("  libkrun: {}", prov.libkrun_path.display());
         for krunfw in &prov.libkrunfw_paths {
-            let name = krunfw
-                .file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string());
+            let name = krunfw.file_name().map_or_else(
+                || "unknown".to_string(),
+                |n| n.to_string_lossy().to_string(),
+            );
             eprintln!("  libkrunfw: {name}");
         }
         if let Some(ref sha) = prov.libkrunfw_sha256 {
@@ -546,6 +621,32 @@ impl VmContext {
             check(
                 (self.krun.krun_set_root)(self.ctx_id, rootfs_c.as_ptr()),
                 "krun_set_root",
+            )
+        }
+    }
+
+    fn add_state_disk(&self, state_disk: &StateDiskConfig) -> Result<(), VmError> {
+        let Some(add_disk3) = self.krun.krun_add_disk3 else {
+            return Err(VmError::HostSetup(
+                "libkrun runtime does not expose krun_add_disk3; rebuild the VM runtime with block support"
+                    .to_string(),
+            ));
+        };
+
+        let block_id_c = CString::new(state_disk.block_id.as_str())?;
+        let disk_path_c = path_to_cstring(&state_disk.path)?;
+        unsafe {
+            check(
+                add_disk3(
+                    self.ctx_id,
+                    block_id_c.as_ptr(),
+                    disk_path_c.as_ptr(),
+                    ffi::KRUN_DISK_FORMAT_RAW,
+                    false,
+                    false,
+                    state_disk_sync_mode(),
+                ),
+                "krun_add_disk3",
             )
         }
     }
@@ -794,6 +895,66 @@ fn vm_rootfs_key(rootfs: &Path) -> String {
     }
 }
 
+fn default_state_disk_path(rootfs: &Path) -> PathBuf {
+    rootfs
+        .parent()
+        .unwrap_or(rootfs)
+        .join(format!("{}-state.raw", vm_rootfs_key(rootfs)))
+}
+
+fn ensure_state_disk_image(state_disk: &StateDiskConfig) -> Result<(), VmError> {
+    if let Some(parent) = state_disk.path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            VmError::HostSetup(format!("create state disk dir {}: {e}", parent.display()))
+        })?;
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&state_disk.path)
+        .map_err(|e| {
+            VmError::HostSetup(format!(
+                "open state disk {}: {e}",
+                state_disk.path.display()
+            ))
+        })?;
+
+    let current_len = file
+        .metadata()
+        .map_err(|e| {
+            VmError::HostSetup(format!(
+                "stat state disk {}: {e}",
+                state_disk.path.display()
+            ))
+        })?
+        .len();
+    if current_len < state_disk.size_bytes {
+        file.set_len(state_disk.size_bytes).map_err(|e| {
+            VmError::HostSetup(format!(
+                "resize state disk {} to {} bytes: {e}",
+                state_disk.path.display(),
+                state_disk.size_bytes
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+fn state_disk_sync_mode() -> u32 {
+    #[cfg(target_os = "macos")]
+    {
+        ffi::KRUN_SYNC_RELAXED
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ffi::KRUN_SYNC_FULL
+    }
+}
+
 fn hash_path_id(path: &Path) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in path.to_string_lossy().as_bytes() {
@@ -900,9 +1061,29 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
     if config.reset {
         reset_runtime_state(&config.rootfs, &config.gateway_name)?;
     }
+    if config.reset
+        && let Some(state_disk) = &config.state_disk
+        && let Err(err) = std::fs::remove_file(&state_disk.path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(VmError::HostSetup(format!(
+            "remove state disk {}: {err}",
+            state_disk.path.display()
+        )));
+    }
+    if let Some(state_disk) = &config.state_disk {
+        ensure_state_disk_image(state_disk)?;
+    }
 
     let launch_start = Instant::now();
     eprintln!("rootfs: {}", config.rootfs.display());
+    if let Some(state_disk) = &config.state_disk {
+        eprintln!(
+            "state disk: {} ({} GiB)",
+            state_disk.path.display(),
+            state_disk.size_bytes / 1024 / 1024 / 1024
+        );
+    }
     eprintln!("vm: {} vCPU(s), {} MiB RAM", config.vcpus, config.mem_mib);
 
     // The runtime is embedded in the binary and extracted on first use.
@@ -928,6 +1109,9 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
     let vm = VmContext::create(config.log_level)?;
     vm.set_vm_config(config.vcpus, config.mem_mib)?;
     vm.set_root(&config.rootfs)?;
+    if let Some(state_disk) = &config.state_disk {
+        vm.add_state_disk(state_disk)?;
+    }
     vm.set_workdir(&config.workdir)?;
 
     // Networking setup
@@ -1093,7 +1277,7 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
     vm.set_console_output(&console_log)?;
 
     // envp: use provided env or minimal defaults
-    let env: Vec<String> = if config.env.is_empty() {
+    let mut env: Vec<String> = if config.env.is_empty() {
         vec![
             "HOME=/root",
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -1105,6 +1289,16 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
     } else {
         config.env.clone()
     };
+    if let Some(state_disk) = &config.state_disk
+        && !env
+            .iter()
+            .any(|entry| entry.starts_with("OPENSHELL_VM_STATE_DISK_DEVICE="))
+    {
+        env.push(format!(
+            "OPENSHELL_VM_STATE_DISK_DEVICE={}",
+            state_disk.guest_device
+        ));
+    }
     vm.set_exec(&config.exec_path, &config.args, &env)?;
 
     // ── Fork and enter the VM ──────────────────────────────────────
@@ -1211,8 +1405,13 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
             }
 
             // Bootstrap the OpenShell control plane and wait for the
-            // service to be reachable. Only for the gateway preset.
-            if config.exec_path == "/srv/openshell-vm-init.sh" {
+            // service to be reachable. Only for the gateway preset, and
+            // only when port forwarding is configured (i.e. the gateway
+            // is reachable from the host). During rootfs pre-init builds,
+            // no --port is specified so there is nothing to health-check
+            // — the build script has its own kubectl-based readiness
+            // checks inside the VM.
+            if config.exec_path == "/srv/openshell-vm-init.sh" && !config.port_map.is_empty() {
                 // Bootstrap stores host-side metadata and mTLS creds.
                 // With pre-baked rootfs (Path 1) this reads PKI directly
                 // from virtio-fs — no kubectl or port forwarding needed.
@@ -1340,11 +1539,13 @@ fn bootstrap_gateway(rootfs: &Path, gateway_name: &str, gateway_port: u16) -> Re
         // the sync check runs before the VM writes its certs, causing
         // mTLS mismatch errors on connection.
         let pki_dir = rootfs.join("opt/openshell/pki");
-        let ca_cert_path = pki_dir.join("ca.crt");
+        // Wait for client.crt — the last file in the PKI generation
+        // sequence — to ensure all cert files are fully written.
+        let sentinel_path = pki_dir.join("client.crt");
         let pki_wait_timeout = std::time::Duration::from_secs(30);
         let pki_wait_start = Instant::now();
-        while !ca_cert_path.is_file()
-            || std::fs::metadata(&ca_cert_path).map_or(true, |m| m.len() == 0)
+        while !sentinel_path.is_file()
+            || std::fs::metadata(&sentinel_path).map_or(true, |m| m.len() == 0)
         {
             if pki_wait_start.elapsed() >= pki_wait_timeout {
                 eprintln!("Warning: PKI not available after 30s, skipping cert sync");
@@ -1352,10 +1553,11 @@ fn bootstrap_gateway(rootfs: &Path, gateway_name: &str, gateway_port: u16) -> Re
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        if ca_cert_path.is_file()
-            && let Err(e) = sync_host_certs_if_stale(&pki_dir, gateway_name) {
-                eprintln!("Warning: cert sync check failed: {e}");
-            }
+        if sentinel_path.is_file()
+            && let Err(e) = sync_host_certs_if_stale(&pki_dir, gateway_name)
+        {
+            eprintln!("Warning: cert sync check failed: {e}");
+        }
 
         eprintln!(
             "Warm boot [{:.1}s]",
@@ -1374,17 +1576,22 @@ fn bootstrap_gateway(rootfs: &Path, gateway_name: &str, gateway_port: u16) -> Re
     // the CA cert appears, then copy client certs to the host.
     eprintln!("Waiting for VM to generate PKI...");
     let pki_dir = rootfs.join("opt/openshell/pki");
-    let ca_cert_path = pki_dir.join("ca.crt");
+    // Wait for client.crt — the last file written by the init script's
+    // PKI generation sequence (ca.crt → server.crt → client.crt).
+    // This avoids a race where ca.crt exists but the other certs
+    // haven't been written yet.
+    let sentinel_path = pki_dir.join("client.crt");
     let poll_timeout = std::time::Duration::from_secs(120);
     let poll_start = Instant::now();
 
     loop {
-        if ca_cert_path.is_file() {
+        if sentinel_path.is_file() {
             // Verify the file has content (not a partial write).
-            if let Ok(m) = std::fs::metadata(&ca_cert_path)
-                && m.len() > 0 {
-                    break;
-                }
+            if let Ok(m) = std::fs::metadata(&sentinel_path)
+                && m.len() > 0
+            {
+                break;
+            }
         }
         if poll_start.elapsed() >= poll_timeout {
             return Err(VmError::Bootstrap(
@@ -1592,6 +1799,58 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gateway_config_uses_default_state_disk_next_to_rootfs() {
+        let rootfs = PathBuf::from("/tmp/openshell-vm-test/rootfs");
+
+        let config = VmConfig::gateway(rootfs.clone());
+        let state_disk = config
+            .state_disk
+            .expect("gateway should enable a state disk");
+
+        assert_eq!(
+            state_disk.path,
+            rootfs.parent().unwrap().join("rootfs-state.raw")
+        );
+        assert_eq!(state_disk.block_id, DEFAULT_STATE_DISK_BLOCK_ID);
+        assert_eq!(state_disk.guest_device, DEFAULT_STATE_DISK_GUEST_DEVICE);
+        assert_eq!(state_disk.size_bytes, DEFAULT_STATE_DISK_SIZE_BYTES);
+    }
+
+    #[test]
+    fn ensure_state_disk_image_creates_sparse_file() {
+        let dir = temp_runtime_dir();
+        fs::create_dir_all(&dir).expect("failed to create runtime dir");
+
+        let state_disk = StateDiskConfig {
+            path: dir.join("state.raw"),
+            size_bytes: 8 * 1024 * 1024,
+            block_id: DEFAULT_STATE_DISK_BLOCK_ID.to_string(),
+            guest_device: DEFAULT_STATE_DISK_GUEST_DEVICE.to_string(),
+        };
+
+        ensure_state_disk_image(&state_disk).expect("state disk should be created");
+
+        let metadata = fs::metadata(&state_disk.path).expect("stat state disk");
+        assert_eq!(metadata.len(), state_disk.size_bytes);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_rootfs_returns_existing_explicit_rootfs() {
+        let dir = temp_runtime_dir();
+        let rootfs = dir.join("rootfs");
+        fs::create_dir_all(&rootfs).expect("failed to create rootfs dir");
+
+        let prepared =
+            prepare_rootfs(Some(rootfs.clone()), "default", false).expect("prepare rootfs");
+
+        assert_eq!(prepared, rootfs);
 
         let _ = fs::remove_dir_all(&dir);
     }

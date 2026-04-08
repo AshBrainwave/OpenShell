@@ -197,8 +197,9 @@ fi
 
 cd libkrun
 
-# Build with NET support for gvproxy networking
-echo "    Building libkrun with NET=1..."
+# Build with NET support for gvproxy networking and BLK support for the
+# host-backed state disk.
+echo "    Building libkrun with NET=1 BLK=1..."
 
 # Locate libclang for clang-sys if LIBCLANG_PATH isn't already set.
 # clang-sys looks for libclang.so or libclang-*.so; on Debian/Ubuntu the
@@ -213,7 +214,7 @@ if [ -z "${LIBCLANG_PATH:-}" ]; then
   done
 fi
 
-make NET=1 -j"$(nproc)"
+make NET=1 BLK=1 -j"$(nproc)"
 
 # Copy output
 cp target/release/libkrun.so "$OUTPUT_DIR/"

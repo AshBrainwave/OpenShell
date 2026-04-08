@@ -4,14 +4,52 @@
 
 set -euo pipefail
 
-ROOTFS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/openshell/openshell-vm/rootfs"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+GATEWAY_BIN="${ROOT}/target/debug/openshell-vm"
 
-if [ "${OPENSHELL_VM_FORCE_ROOTFS_REBUILD:-}" != "1" ] \
-  && [ -x "${ROOTFS_DIR}/usr/local/bin/k3s" ] \
-  && { [ -f "${ROOTFS_DIR}/opt/openshell/.initialized" ] \
-       || [ -f "${ROOTFS_DIR}/opt/openshell/.reset" ]; }; then
-  echo "using existing openshell-vm rootfs at ${ROOTFS_DIR}"
-  exit 0
+NAME="default"
+ROOTFS_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name)
+      NAME="$2"
+      shift 2
+      ;;
+    --name=*)
+      NAME="${1#--name=}"
+      shift
+      ;;
+    --rootfs)
+      ROOTFS_ARGS=("$1" "$2")
+      shift 2
+      ;;
+    --rootfs=*)
+      ROOTFS_ARGS=("$1")
+      shift
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ ! -x "${GATEWAY_BIN}" ]; then
+  echo "ERROR: openshell-vm binary not found at ${GATEWAY_BIN}" >&2
+  echo "       Run: mise run vm:build:embedded" >&2
+  exit 1
 fi
 
-exec crates/openshell-vm/scripts/build-rootfs.sh
+prepare_args=(--name "${NAME}")
+if [ "${#ROOTFS_ARGS[@]}" -gt 0 ]; then
+  prepare_args=("${ROOTFS_ARGS[@]}" "${prepare_args[@]}")
+fi
+if [ "${OPENSHELL_VM_FORCE_ROOTFS_REBUILD:-}" = "1" ]; then
+  prepare_args+=(prepare-rootfs --force)
+else
+  prepare_args+=(prepare-rootfs)
+fi
+
+ROOTFS_PATH="$("${GATEWAY_BIN}" "${prepare_args[@]}")"
+echo "using openshell-vm rootfs at ${ROOTFS_PATH}"

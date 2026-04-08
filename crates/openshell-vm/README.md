@@ -105,7 +105,7 @@ Run multiple isolated VM instances side-by-side:
 ./target/debug/openshell-vm --name staging
 ```
 
-Each instance gets its own rootfs clone under `~/.local/share/openshell/openshell-vm/instances/<name>/`.
+Each instance gets its own extracted rootfs under `~/.local/share/openshell/openshell-vm/<version>/instances/<name>/rootfs`.
 
 ## CLI Reference
 
@@ -127,6 +127,7 @@ Options:
   --reset                  Wipe runtime state before booting
 
 Subcommands:
+  prepare-rootfs           Ensure the target rootfs exists
   exec                     Execute a command inside a running VM
 ```
 
@@ -194,8 +195,9 @@ Guest VM (aarch64 Linux)
 
 | Task | Description |
 |------|-------------|
-| `vm` | Build and run the VM |
+| `vm` | Build and run the VM using a per-instance rootfs |
 | `vm:build` | Force full rebuild including rootfs |
+| `vm:rootfs` | Prepare the default named VM rootfs |
 | `vm:build:embedded` | Build single binary with embedded runtime |
 | `vm:build:embedded:quick` | Build using cached rootfs tarball |
 | `vm:build:rootfs-tarball` | Build full rootfs tarball |

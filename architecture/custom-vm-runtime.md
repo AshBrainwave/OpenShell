@@ -49,7 +49,7 @@ these to XDG cache directories with progress bars:
 ├── libkrunfw.{5.dylib,.so.5}
 └── gvproxy
 
-~/.local/share/openshell/openshell-vm/{version}/rootfs/
+~/.local/share/openshell/openshell-vm/{version}/instances/<name>/rootfs/
 ├── usr/local/bin/k3s
 ├── opt/openshell/bin/openshell-sandbox
 ├── opt/openshell/manifests/
@@ -146,8 +146,8 @@ One verification tool is provided:
 
 The standalone `openshell-vm` binary supports `openshell-vm exec -- <command...>` for a running VM.
 
-- The host stores local VM runtime state next to the rootfs artifacts
-- libkrun maps a per-rootfs host unix socket into the guest on vsock port `10777`
+- Each VM instance stores local runtime state next to its instance rootfs
+- libkrun maps a per-instance host unix socket into the guest on vsock port `10777`
 - `openshell-vm-init.sh` starts `openshell-vm-exec-agent.py` during boot
 - `openshell-vm exec` connects to the host socket, which libkrun forwards into the guest agent
 - The guest agent spawns the command, then streams stdout, stderr, and exit status back

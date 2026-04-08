@@ -8,7 +8,7 @@
 //!
 //! Cache locations:
 //! - Runtime: `~/.local/share/openshell/vm-runtime/{version}/`
-//! - Rootfs:  `~/.local/share/openshell/openshell-vm/rootfs/`
+//! - Rootfs:  `~/.local/share/openshell/openshell-vm/{version}/instances/<name>/rootfs/`
 
 use std::fs;
 use std::io::{Read, Write};
@@ -94,16 +94,17 @@ pub fn ensure_runtime_extracted() -> Result<PathBuf, VmError> {
     // Check if already extracted with correct version
     if version_marker.exists()
         && let Ok(cached_version) = fs::read_to_string(&version_marker)
-            && cached_version.trim() == VERSION {
-                // Validate files exist
-                if validate_runtime_dir(&cache_dir).is_ok() {
-                    tracing::debug!(
-                        path = %cache_dir.display(),
-                        "Using cached VM runtime"
-                    );
-                    return Ok(cache_dir);
-                }
-            }
+        && cached_version.trim() == VERSION
+    {
+        // Validate files exist
+        if validate_runtime_dir(&cache_dir).is_ok() {
+            tracing::debug!(
+                path = %cache_dir.display(),
+                "Using cached VM runtime"
+            );
+            return Ok(cache_dir);
+        }
+    }
 
     // Clean up old versions before extracting new one
     cleanup_old_versions(&cache_dir)?;
@@ -174,13 +175,14 @@ pub fn extract_rootfs_to(dest: &Path) -> Result<(), VmError> {
     // Already extracted with the correct version — nothing to do.
     if version_marker.exists()
         && let Ok(cached_version) = fs::read_to_string(&version_marker)
-            && cached_version.trim() == VERSION {
-                tracing::debug!(
-                    path = %dest.display(),
-                    "Using cached rootfs"
-                );
-                return Ok(());
-            }
+        && cached_version.trim() == VERSION
+    {
+        tracing::debug!(
+            path = %dest.display(),
+            "Using cached rootfs"
+        );
+        return Ok(());
+    }
 
     // Remove existing if present (version mismatch or incomplete extraction).
     if dest.exists() {

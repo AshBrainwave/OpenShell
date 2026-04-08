@@ -129,6 +129,46 @@ fi
 mkdir -p /var/lib/rancher/k3s
 mkdir -p /etc/rancher/k3s
 
+ROOTFS_CONTAINERD_DIR="/var/lib/rancher/k3s/agent/containerd"
+CONTAINERD_DIR="$ROOTFS_CONTAINERD_DIR"
+
+# Mount mutable containerd state on a host-backed virtio-blk disk. This
+# keeps overlayfs upper/work dirs off virtio-fs while preserving state on
+# the host across VM restarts.
+STATE_DISK_DEVICE="${OPENSHELL_VM_STATE_DISK_DEVICE:-/dev/vda}"
+STATE_MOUNT_DIR="/mnt/openshell-state"
+STATE_CONTAINERD_DIR="${STATE_MOUNT_DIR}/containerd"
+STATE_DISK_ACTIVE=false
+mkdir -p "$STATE_MOUNT_DIR"
+
+if [ -b "$STATE_DISK_DEVICE" ]; then
+    ts "configuring block-backed containerd state on ${STATE_DISK_DEVICE}"
+    if ! blkid "$STATE_DISK_DEVICE" >/dev/null 2>&1; then
+        mkfs.ext4 -F -L openshell-state "$STATE_DISK_DEVICE" >/dev/null 2>&1
+        ts "formatted state disk"
+    fi
+
+    mount -t ext4 -o noatime "$STATE_DISK_DEVICE" "$STATE_MOUNT_DIR"
+    mkdir -p "$STATE_CONTAINERD_DIR"
+
+    if [ ! -f "${STATE_MOUNT_DIR}/.seeded-containerd" ]; then
+        if [ -d "$ROOTFS_CONTAINERD_DIR" ] && [ -n "$(ls -A "$ROOTFS_CONTAINERD_DIR" 2>/dev/null)" ]; then
+            ts "seeding containerd state from rootfs"
+            tar -C "$ROOTFS_CONTAINERD_DIR" -cf - . | tar -C "$STATE_CONTAINERD_DIR" -xf -
+        else
+            ts "state disk is empty; starting containerd with a fresh state directory"
+        fi
+        date -u +%Y-%m-%dT%H:%M:%SZ > "${STATE_MOUNT_DIR}/.seeded-containerd"
+    fi
+
+    mkdir -p "$ROOTFS_CONTAINERD_DIR"
+    mount --bind "$STATE_CONTAINERD_DIR" "$ROOTFS_CONTAINERD_DIR"
+    STATE_DISK_ACTIVE=true
+    ts "containerd state mounted from block disk"
+else
+    ts "no block state disk found; using virtio-fs-backed containerd state"
+fi
+
 # Clean stale runtime artifacts from previous boots (virtio-fs persists
 # the rootfs between VM restarts).
 rm -rf /var/lib/rancher/k3s/server/tls/temporary-certs 2>/dev/null || true
@@ -145,23 +185,9 @@ find /run -name '*.sock' -delete 2>/dev/null || true
 # Clean stale containerd runtime state from previous boots.
 #
 # The rootfs persists across VM restarts via virtio-fs. The overlayfs
-# snapshotter is backed by tmpfs (see below), so snapshot layer data is
-# wiped on every boot. We must also delete meta.db because it contains
-# snapshot metadata (parent chain references) that become invalid once
-# the tmpfs is remounted. If meta.db survives but the snapshot dirs
-# don't, containerd fails every pod with:
-#   "missing parent <sha256:...> bucket: not found"
-# because it tries to look up snapshot parents that no longer exist.
-#
-# Deleting meta.db is safe: containerd rebuilds it on startup by
-# re-importing the pre-baked image tarballs from
-# /var/lib/rancher/k3s/agent/images/ (adds ~3s to boot). The content
-# store blobs on virtio-fs are preserved so no network pulls are needed.
-#
-# The kine (SQLite) DB cleanup in build-rootfs.sh already removes stale
-# pod/sandbox records from k3s etcd, preventing kubelet from reconciling
-# against stale sandboxes.
-CONTAINERD_DIR="/var/lib/rancher/k3s/agent/containerd"
+# snapshotter now lives on the host-backed state disk when present, so
+# snapshot data and meta.db persist across boots. We only clean runtime
+# state (shim PIDs, sockets) that becomes stale when the VM restarts.
 if [ -d "$CONTAINERD_DIR" ]; then
     # Remove runtime task state (stale shim PIDs, sockets from dead processes).
     rm -rf "${CONTAINERD_DIR}/io.containerd.runtime.v2.task" 2>/dev/null || true
@@ -173,26 +199,25 @@ if [ -d "$CONTAINERD_DIR" ]; then
     # Clean stale ingest temp files from the content store.
     rm -rf "${CONTAINERD_DIR}/io.containerd.content.v1.content/ingest" 2>/dev/null || true
     mkdir -p "${CONTAINERD_DIR}/io.containerd.content.v1.content/ingest"
-    # Delete meta.db — snapshot metadata references are invalidated by
-    # the tmpfs remount below. containerd will rebuild it from the
-    # pre-baked image tarballs on startup.
-    rm -f "${CONTAINERD_DIR}/io.containerd.metadata.v1.bolt/meta.db" 2>/dev/null || true
-    ts "cleaned containerd runtime state (reset meta.db + content store preserved)"
+    # meta.db and overlayfs snapshots persist across boots on virtio-fs.
+    # No need to delete meta.db — snapshot metadata remains valid since
+    # the snapshotter directory is no longer backed by volatile tmpfs.
+    ts "cleaned containerd runtime state (meta.db + snapshots preserved)"
 fi
 rm -rf /run/k3s 2>/dev/null || true
 
-# Mount tmpfs for the overlayfs snapshotter upper/work directories.
-# The overlayfs snapshotter on virtio-fs fails with "network dropped
-# connection on reset" when runc tries to create bind mount targets
-# inside the overlay. This is because virtio-fs (FUSE) doesn't fully
-# support the file operations overlayfs needs in the upper layer.
-# Using tmpfs (backed by RAM) for the snapshotter directory avoids
-# this issue entirely. With 8GB VM RAM, this leaves ~6GB for image
-# layers which is sufficient for typical sandbox workloads.
+# Ensure the overlayfs snapshotter directory exists. The snapshotter
+# runs directly on virtio-fs, so layer data and snapshot metadata
+# persist across VM restarts. This eliminates the need to re-import
+# image tarballs and re-extract layers on every boot, significantly
+# reducing sandbox creation time.
 OVERLAYFS_DIR="${CONTAINERD_DIR}/io.containerd.snapshotter.v1.overlayfs"
 mkdir -p "$OVERLAYFS_DIR"
-mount -t tmpfs -o size=4g tmpfs "$OVERLAYFS_DIR"
-ts "mounted tmpfs for overlayfs snapshotter (4GB)"
+if [ "$STATE_DISK_ACTIVE" = true ]; then
+    ts "overlayfs snapshotter on block-backed containerd state"
+else
+    ts "overlayfs snapshotter on virtio-fs (persistent)"
+fi
 
 ts "stale artifacts cleaned"
 
@@ -645,15 +670,18 @@ K3S_ARGS=(
     --kube-proxy-arg=nodeport-addresses=0.0.0.0/0
     # virtio-fs passthrough reports the host disk usage, which is
     # misleading — kubelet sees 90%+ used and enters eviction pressure,
-    # blocking image pulls and pod scheduling. Disable disk eviction
-    # thresholds since the VM shares the host filesystem.
-    "--kubelet-arg=eviction-hard=imagefs.available<1%,nodefs.available<1%"
+    # blocking image pulls and pod scheduling. Disable all disk-based
+    # eviction since the VM shares the host filesystem. Setting
+    # thresholds to 0% effectively disables eviction for each signal.
+    "--kubelet-arg=eviction-hard=imagefs.available<0%,nodefs.available<0%"
     "--kubelet-arg=eviction-minimum-reclaim=imagefs.available=1%,nodefs.available=1%"
-    --kubelet-arg=image-gc-high-threshold=99
-    --kubelet-arg=image-gc-low-threshold=98
-    # Increase CRI runtime timeout for large image operations. The native
-    # snapshotter on virtio-fs is slow for large images (~1GB sandbox base);
-    # the default 2m timeout causes CreateContainer failures.
+    --kubelet-arg=image-gc-high-threshold=100
+    --kubelet-arg=image-gc-low-threshold=99
+    # Increase CRI runtime timeout for large image operations. The first
+    # container create after an image import may still be slow if
+    # containerd needs to extract layers. 10m is a conservative safety
+    # margin; typical operations complete much faster with persistent
+    # overlayfs snapshots.
     --kubelet-arg=runtime-request-timeout=10m
 )
 

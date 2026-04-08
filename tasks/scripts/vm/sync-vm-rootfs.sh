@@ -12,8 +12,69 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-ROOTFS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/openshell/openshell-vm/rootfs"
 SCRIPT_DIR="${ROOT}/crates/openshell-vm/scripts"
+IMAGE_REPO_BASE="${IMAGE_REPO_BASE:-openshell}"
+IMAGE_TAG="${IMAGE_TAG:-dev}"
+SERVER_IMAGE="${IMAGE_REPO_BASE}/gateway:${IMAGE_TAG}"
+NAME="default"
+ROOTFS_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --name)
+            NAME="$2"
+            shift 2
+            ;;
+        --name=*)
+            NAME="${1#--name=}"
+            shift
+            ;;
+        --rootfs)
+            ROOTFS_ARGS=("$1" "$2")
+            shift 2
+            ;;
+        --rootfs=*)
+            ROOTFS_ARGS=("$1")
+            shift
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+ensure_args=(--name "${NAME}")
+if [ "${#ROOTFS_ARGS[@]}" -gt 0 ]; then
+    ensure_args=("${ROOTFS_ARGS[@]}" "${ensure_args[@]}")
+fi
+
+ROOTFS_DIR="$("${ROOT}/tasks/scripts/vm/ensure-vm-rootfs.sh" "${ensure_args[@]}" | tail -n 1 | sed 's/^using openshell-vm rootfs at //')"
+
+patch_vm_helmchart() {
+    local helmchart="$1"
+    [ -f "${helmchart}" ] || return 0
+
+    sed_in_place() {
+        local expr="$1"
+        sed -i.bak -E "${expr}" "${helmchart}"
+        rm -f "${helmchart}.bak"
+    }
+
+    # Mirror the build-rootfs patching so the VM keeps using the locally
+    # imported openshell/gateway:dev image after incremental rootfs syncs.
+    sed_in_place 's|__IMAGE_PULL_POLICY__|IfNotPresent|g'
+    sed_in_place 's|__SANDBOX_IMAGE_PULL_POLICY__|"IfNotPresent"|g'
+    sed_in_place 's|__DB_URL__|"sqlite:/tmp/openshell.db"|g'
+    sed_in_place "s|repository:[[:space:]]*[^[:space:]]+|repository: ${SERVER_IMAGE%:*}|"
+    sed_in_place "s|tag:[[:space:]]*\"?[^\"[:space:]]+\"?|tag: \"${IMAGE_TAG}\"|"
+    sed_in_place 's|sshGatewayHost: __SSH_GATEWAY_HOST__|sshGatewayHost: ""|g'
+    sed_in_place 's|sshGatewayPort: __SSH_GATEWAY_PORT__|sshGatewayPort: 0|g'
+    sed_in_place 's|__DISABLE_GATEWAY_AUTH__|false|g'
+    sed_in_place 's|__DISABLE_TLS__|false|g'
+    sed_in_place 's|hostGatewayIP: __HOST_GATEWAY_IP__|hostGatewayIP: ""|g'
+    sed_in_place '/__CHART_CHECKSUM__/d'
+}
 
 if [ ! -d "${ROOTFS_DIR}/srv" ]; then
     # Rootfs doesn't exist yet — nothing to sync. ensure-vm-rootfs.sh
@@ -68,6 +129,33 @@ if [ -d "${MANIFEST_SRC}" ]; then
             echo "  updated: /opt/openshell/manifests/${base}"
         fi
     done
+fi
+
+patch_vm_helmchart "${MANIFEST_DST}/openshell-helmchart.yaml"
+patch_vm_helmchart "${ROOTFS_DIR}/var/lib/rancher/k3s/server/manifests/openshell-helmchart.yaml"
+
+# ── Gateway image tarball ──────────────────────────────────────────────
+# The VM rootfs airgap-imports openshell/gateway:dev from k3s/agent/images/.
+# Keep that tarball in sync with the local Docker image so `mise run e2e:vm`
+# validates the current openshell-server code, not whatever image happened to
+# be baked into the rootfs last time it was rebuilt.
+SERVER_IMAGE_TAR="${ROOTFS_DIR}/var/lib/rancher/k3s/agent/images/openshell-server.tar.zst"
+SERVER_IMAGE_ID_FILE="${ROOTFS_DIR}/opt/openshell/.gateway-image-id"
+if command -v docker >/dev/null 2>&1 && docker image inspect "${SERVER_IMAGE}" >/dev/null 2>&1; then
+    current_image_id=$(docker image inspect --format '{{.Id}}' "${SERVER_IMAGE}")
+    previous_image_id=""
+    if [ -f "${SERVER_IMAGE_ID_FILE}" ]; then
+        previous_image_id=$(cat "${SERVER_IMAGE_ID_FILE}")
+    fi
+
+    if [ "${current_image_id}" != "${previous_image_id}" ] || [ ! -f "${SERVER_IMAGE_TAR}" ]; then
+        mkdir -p "$(dirname "${SERVER_IMAGE_TAR}")" "$(dirname "${SERVER_IMAGE_ID_FILE}")"
+        tmp_tar=$(mktemp /tmp/openshell-server-image.XXXXXX)
+        docker save "${SERVER_IMAGE}" | zstd -f -T0 -3 -o "${tmp_tar}" >/dev/null
+        mv "${tmp_tar}" "${SERVER_IMAGE_TAR}"
+        printf '%s\n' "${current_image_id}" > "${SERVER_IMAGE_ID_FILE}"
+        echo "  updated: /var/lib/rancher/k3s/agent/images/openshell-server.tar.zst"
+    fi
 fi
 
 # ── Supervisor binary ─────────────────────────────────────────────────

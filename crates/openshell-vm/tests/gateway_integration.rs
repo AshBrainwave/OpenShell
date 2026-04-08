@@ -6,7 +6,8 @@
 //! These tests require:
 //! - libkrun installed (e.g. `brew tap slp/krun && brew install libkrun`)
 //! - macOS ARM64 with Apple Hypervisor.framework
-//! - A pre-built rootfs at `~/.local/share/openshell/openshell-vm/rootfs`
+//! - An `openshell-vm` binary built with an embedded rootfs tarball
+//!   (for example via `mise run vm:build:embedded`)
 //!
 //! All tests are `#[ignore]` — run them explicitly:
 //!
