@@ -198,3 +198,4 @@ architecture/plans
 .claude/worktrees/
 rfc.md
 .z3-trace
+.worktrees
