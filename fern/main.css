@@ -245,7 +245,7 @@ html[data-theme=dark] {
 /* Sidebar styling */
 #fern-sidebar {
     border-right: 1px solid var(--border, var(--grayscale-a5)) !important;
-    height: 100vh !important;
+    height: calc(100vh - var(--header-height)) !important;
 }
 .fern-sidebar-link:not(:hover){
     background-color: transparent !important;
