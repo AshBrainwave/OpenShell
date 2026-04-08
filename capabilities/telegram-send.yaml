@@ -1,0 +1,21 @@
+id: telegram_send_only
+title: Telegram message send
+risk: high
+description: Allow a sandbox to send Telegram bot messages.
+policy_name: telegram_send_only
+constraints:
+  - POST only
+  - Limited to sendMessage
+recommended_usage:
+  - Send bounded Telegram notifications
+block:
+  endpoints:
+    - host: api.telegram.org
+      port: 443
+      protocol: https
+      rules:
+        - allow:
+            method: POST
+            path: /bot*/sendMessage
+  binaries:
+    - path: /usr/bin/curl

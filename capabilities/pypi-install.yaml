@@ -1,0 +1,21 @@
+id: pypi_install
+title: PyPI package install
+risk: medium
+description: Allow package index and artifact downloads for Python package installation.
+policy_name: pypi_install
+constraints:
+  - HTTPS only
+  - Limited to PyPI hosts
+recommended_usage:
+  - Install Python dependencies with uv or pip
+block:
+  endpoints:
+    - host: pypi.org
+      port: 443
+      protocol: https
+    - host: files.pythonhosted.org
+      port: 443
+      protocol: https
+  binaries:
+    - path: /usr/bin/uv
+    - path: /usr/bin/pip

@@ -2621,6 +2621,397 @@ fn load_sandbox_policy(cli_path: Option<&str>) -> Result<Option<SandboxPolicy>> 
     openshell_policy::load_sandbox_policy(cli_path)
 }
 
+async fn fetch_active_sandbox_policy(
+    server: &str,
+    name: &str,
+    tls: &TlsOptions,
+) -> Result<SandboxPolicy> {
+    let mut client = grpc_client(server, tls).await?;
+    let status_resp = client
+        .get_sandbox_policy_status(GetSandboxPolicyStatusRequest {
+            name: name.to_string(),
+            version: 0,
+            global: false,
+        })
+        .await
+        .into_diagnostic()?;
+    let inner = status_resp.into_inner();
+    Ok(inner
+        .revision
+        .and_then(|revision| revision.policy)
+        .unwrap_or_else(openshell_policy::restrictive_default_policy))
+}
+
+fn print_policy_yaml_block(label: &str, policy: &SandboxPolicy) -> Result<()> {
+    println!("{}", label.cyan().bold());
+    println!();
+    let yaml_str = openshell_policy::serialize_sandbox_policy(policy)
+        .wrap_err("failed to serialize policy to YAML")?;
+    print!("{yaml_str}");
+    Ok(())
+}
+
+fn print_policy_preview(
+    before: &SandboxPolicy,
+    after: &SandboxPolicy,
+    print_result_yaml: bool,
+) -> Result<()> {
+    let delta = openshell_policy::show_risk_delta(before, after);
+    println!(
+        "{} {} -> {}",
+        "Risk:".dimmed(),
+        delta.before.overall_risk,
+        delta.after.overall_risk
+    );
+    if !delta.introduced.is_empty() {
+        println!("{}", "Introduced:".cyan().bold());
+        for finding in &delta.introduced {
+            println!("  {} [{}] {}", "+".green(), finding.level, finding.rule_name);
+            if !finding.summary.is_empty() {
+                println!("    {}", finding.summary);
+            }
+        }
+    }
+    if !delta.changed.is_empty() {
+        println!("{}", "Changed:".cyan().bold());
+        for change in &delta.changed {
+            println!(
+                "  {} {} [{} -> {}] {}",
+                "~".yellow(),
+                change.rule_name,
+                change.before,
+                change.after,
+                change.summary
+            );
+        }
+    }
+    if !delta.removed.is_empty() {
+        println!("{}", "Removed:".cyan().bold());
+        for finding in &delta.removed {
+            println!("  {} [{}] {}", "-".red(), finding.level, finding.rule_name);
+        }
+    }
+    if print_result_yaml {
+        println!();
+        print_policy_yaml_block("Resulting Policy:", after)?;
+    }
+    Ok(())
+}
+
+async fn submit_policy_update(
+    server: &str,
+    name: &str,
+    policy: SandboxPolicy,
+    wait: bool,
+    timeout_secs: u64,
+    tls: &TlsOptions,
+) -> Result<()> {
+    let tempdir = tempfile::tempdir().into_diagnostic()?;
+    let policy_path = tempdir.path().join("policy.yaml");
+    let yaml = openshell_policy::serialize_sandbox_policy(&policy)
+        .wrap_err("failed to serialize updated policy")?;
+    std::fs::write(&policy_path, yaml).into_diagnostic()?;
+    sandbox_policy_set(
+        server,
+        name,
+        policy_path
+            .to_str()
+            .ok_or_else(|| miette!("temporary policy path is not valid UTF-8"))?,
+        wait,
+        timeout_secs,
+        tls,
+    )
+    .await
+}
+
+pub fn policy_list_capabilities(capabilities_dir: &str) -> Result<()> {
+    let catalog = openshell_policy::load_capability_catalog(Path::new(capabilities_dir))?;
+    let mut capabilities = catalog.values().collect::<Vec<_>>();
+    capabilities.sort_by(|lhs, rhs| lhs.id.cmp(&rhs.id));
+
+    println!("{:<24} {:<10} TITLE", "ID", "RISK");
+    for capability in capabilities {
+        println!(
+            "{:<24} {:<10} {}",
+            capability.id, capability.risk, capability.title
+        );
+    }
+    Ok(())
+}
+
+pub fn policy_list_profiles() {
+    println!("{:<16} CAPABILITIES", "PROFILE");
+    for profile in openshell_policy::list_profiles() {
+        let capabilities = openshell_policy::profile_capability_ids(profile)
+            .map(|ids| ids.join(", "))
+            .unwrap_or_default();
+        println!("{:<16} {}", profile, capabilities);
+    }
+}
+
+pub async fn sandbox_policy_explain(server: &str, name: &str, tls: &TlsOptions) -> Result<()> {
+    let policy = fetch_active_sandbox_policy(server, name, tls).await?;
+    println!("{}", "Filesystem:".cyan().bold());
+    if let Some(filesystem) = &policy.filesystem {
+        println!("  include_workdir: {}", filesystem.include_workdir);
+        if !filesystem.read_only.is_empty() {
+            println!("  read_only: {}", filesystem.read_only.join(", "));
+        }
+        if !filesystem.read_write.is_empty() {
+            println!("  read_write: {}", filesystem.read_write.join(", "));
+        }
+    } else {
+        println!("  none");
+    }
+
+    println!();
+    println!("{}", "Network:".cyan().bold());
+    if policy.network_policies.is_empty() {
+        println!("  no outbound rules");
+    } else {
+        let mut rules = policy.network_policies.iter().collect::<Vec<_>>();
+        rules.sort_by(|lhs, rhs| lhs.0.cmp(rhs.0));
+        for (rule_name, rule) in rules {
+            println!("  {}", rule_name);
+            let binaries = rule
+                .binaries
+                .iter()
+                .map(|binary| binary.path.as_str())
+                .collect::<Vec<_>>();
+            if !binaries.is_empty() {
+                println!("    binaries: {}", binaries.join(", "));
+            }
+            for endpoint in &rule.endpoints {
+                let ports = if endpoint.ports.is_empty() {
+                    if endpoint.port == 0 {
+                        String::new()
+                    } else {
+                        endpoint.port.to_string()
+                    }
+                } else {
+                    endpoint
+                        .ports
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                println!(
+                    "    endpoint: {}{}{}",
+                    endpoint.host,
+                    if ports.is_empty() { "" } else { ":" },
+                    ports
+                );
+                if !endpoint.protocol.is_empty() {
+                    println!("      protocol: {}", endpoint.protocol);
+                }
+                if !endpoint.access.is_empty() {
+                    println!("      access: {}", endpoint.access);
+                }
+                for l7_rule in &endpoint.rules {
+                    if let Some(allow) = &l7_rule.allow {
+                        println!(
+                            "      allow: {} {}",
+                            if allow.method.is_empty() {
+                                "*"
+                            } else {
+                                &allow.method
+                            },
+                            if allow.path.is_empty() { "*" } else { &allow.path }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    println!();
+    let risk = openshell_policy::analyze_policy_risk(&policy);
+    println!("{} {}", "Overall risk:".dimmed(), risk.overall_risk);
+    Ok(())
+}
+
+pub async fn sandbox_policy_lint(server: &str, name: &str, tls: &TlsOptions) -> Result<()> {
+    let policy = fetch_active_sandbox_policy(server, name, tls).await?;
+    let lints = openshell_policy::lint_policy(&policy);
+    if lints.is_empty() {
+        println!("No lint warnings.");
+        return Ok(());
+    }
+
+    for lint in lints {
+        if let Some(rule_name) = lint.rule_name {
+            println!("[{}] {}: {}", lint.code, rule_name, lint.message);
+        } else {
+            println!("[{}] {}", lint.code, lint.message);
+        }
+    }
+    Ok(())
+}
+
+pub async fn sandbox_policy_show_risk_delta(
+    server: &str,
+    name: &str,
+    policy_path: &str,
+    tls: &TlsOptions,
+) -> Result<()> {
+    let before = fetch_active_sandbox_policy(server, name, tls).await?;
+    let after = load_sandbox_policy(Some(policy_path))?
+        .ok_or_else(|| miette!("No policy loaded from {policy_path}"))?;
+    print_policy_preview(&before, &after, false)
+}
+
+async fn mutate_sandbox_policy<F>(
+    server: &str,
+    name: &str,
+    apply: bool,
+    diff: bool,
+    wait: bool,
+    timeout_secs: u64,
+    tls: &TlsOptions,
+    mutate: F,
+) -> Result<()>
+where
+    F: FnOnce(&mut SandboxPolicy) -> Result<()>,
+{
+    let before = fetch_active_sandbox_policy(server, name, tls).await?;
+    let mut after = before.clone();
+    mutate(&mut after)?;
+    print_policy_preview(&before, &after, diff)?;
+    if !apply {
+        println!();
+        println!("{}", "Dry run only. Re-run with --apply to submit.".dimmed());
+        return Ok(());
+    }
+    submit_policy_update(server, name, after, wait, timeout_secs, tls).await
+}
+
+pub async fn sandbox_policy_add_capability(
+    server: &str,
+    name: &str,
+    capability_id: &str,
+    capabilities_dir: &str,
+    apply: bool,
+    diff: bool,
+    wait: bool,
+    timeout_secs: u64,
+    tls: &TlsOptions,
+) -> Result<()> {
+    let catalog = openshell_policy::load_capability_catalog(Path::new(capabilities_dir))?;
+    let capability = catalog
+        .get(capability_id)
+        .ok_or_else(|| miette!("unknown capability '{capability_id}'"))?
+        .clone();
+    mutate_sandbox_policy(
+        server,
+        name,
+        apply,
+        diff,
+        wait,
+        timeout_secs,
+        tls,
+        move |policy| {
+            openshell_policy::add_capability(policy, &capability);
+            Ok(())
+        },
+    )
+    .await
+}
+
+pub async fn sandbox_policy_replace_capability(
+    server: &str,
+    name: &str,
+    capability_id: &str,
+    capabilities_dir: &str,
+    apply: bool,
+    diff: bool,
+    wait: bool,
+    timeout_secs: u64,
+    tls: &TlsOptions,
+) -> Result<()> {
+    let catalog = openshell_policy::load_capability_catalog(Path::new(capabilities_dir))?;
+    let capability = catalog
+        .get(capability_id)
+        .ok_or_else(|| miette!("unknown capability '{capability_id}'"))?
+        .clone();
+    mutate_sandbox_policy(
+        server,
+        name,
+        apply,
+        diff,
+        wait,
+        timeout_secs,
+        tls,
+        move |policy| {
+            openshell_policy::replace_capability(policy, &capability);
+            Ok(())
+        },
+    )
+    .await
+}
+
+pub async fn sandbox_policy_remove_capability(
+    server: &str,
+    name: &str,
+    capability_id: &str,
+    capabilities_dir: &str,
+    apply: bool,
+    diff: bool,
+    wait: bool,
+    timeout_secs: u64,
+    tls: &TlsOptions,
+) -> Result<()> {
+    let catalog = openshell_policy::load_capability_catalog(Path::new(capabilities_dir))?;
+    let capability = catalog
+        .get(capability_id)
+        .ok_or_else(|| miette!("unknown capability '{capability_id}'"))?
+        .clone();
+    mutate_sandbox_policy(
+        server,
+        name,
+        apply,
+        diff,
+        wait,
+        timeout_secs,
+        tls,
+        move |policy| {
+            if !openshell_policy::remove_capability(policy, &capability) {
+                return Err(miette!(
+                    "capability '{}' is not present in the current policy",
+                    capability_id
+                ));
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+pub async fn sandbox_policy_apply_profile(
+    server: &str,
+    name: &str,
+    profile: &str,
+    capabilities_dir: &str,
+    apply: bool,
+    diff: bool,
+    wait: bool,
+    timeout_secs: u64,
+    tls: &TlsOptions,
+) -> Result<()> {
+    let catalog = openshell_policy::load_capability_catalog(Path::new(capabilities_dir))?;
+    mutate_sandbox_policy(
+        server,
+        name,
+        apply,
+        diff,
+        wait,
+        timeout_secs,
+        tls,
+        move |policy| openshell_policy::apply_profile(policy, profile, &catalog),
+    )
+    .await
+}
+
 /// Sync files to or from a sandbox.
 ///
 /// Dispatches to `sandbox_sync_up` or `sandbox_sync_down` based on the

@@ -1,0 +1,19 @@
+id: github_readonly
+title: GitHub read-only API
+risk: low
+description: Allow read-only HTTPS requests to the GitHub REST API.
+policy_name: github_readonly
+constraints:
+  - HTTPS only
+  - Read-only API methods
+recommended_usage:
+  - Read repository metadata
+  - Inspect issues and pull requests
+block:
+  endpoints:
+    - host: api.github.com
+      port: 443
+      protocol: https
+      access: read-only
+  binaries:
+    - path: /usr/bin/curl

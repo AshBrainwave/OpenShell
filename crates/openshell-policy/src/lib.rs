@@ -20,6 +20,16 @@ use openshell_core::proto::{
 };
 use serde::{Deserialize, Serialize};
 
+mod capabilities;
+
+pub use capabilities::{
+    CapabilityDefinition, DEFAULT_CAPABILITIES_DIR, PolicyLint, RiskChange, RiskDelta,
+    RiskFinding, RiskLevel, RiskReport, add_capability, analyze_policy_risk, apply_profile,
+    lint_policy, list_profiles, load_capability_catalog, load_capability_definition,
+    parse_capability_definition, profile_capability_ids, remove_capability, replace_capability,
+    show_risk_delta,
+};
+
 // ---------------------------------------------------------------------------
 // YAML serde types (canonical — used for both parsing and serialization)
 // ---------------------------------------------------------------------------

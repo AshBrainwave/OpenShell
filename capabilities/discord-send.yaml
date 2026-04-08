@@ -1,0 +1,21 @@
+id: discord_send
+title: Discord message send
+risk: high
+description: Allow a sandbox to send Discord channel messages.
+policy_name: discord_send
+constraints:
+  - POST only
+  - Limited to Discord message creation path
+recommended_usage:
+  - Send bounded channel notifications
+block:
+  endpoints:
+    - host: discord.com
+      port: 443
+      protocol: https
+      rules:
+        - allow:
+            method: POST
+            path: /api*/channels/*/messages
+  binaries:
+    - path: /usr/bin/curl

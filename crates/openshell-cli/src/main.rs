@@ -1403,6 +1403,170 @@ enum DraftCommands {
 
 #[derive(Subcommand, Debug)]
 enum PolicyCommands {
+    /// List built-in policy capabilities from the capability catalog.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    ListCapabilities {
+        /// Path to the capability catalog directory.
+        #[arg(long, value_hint = ValueHint::DirPath, default_value = openshell_policy::DEFAULT_CAPABILITIES_DIR)]
+        capabilities_dir: String,
+    },
+
+    /// List built-in policy profiles.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    ListProfiles,
+
+    /// Explain the effective policy for a sandbox.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    Explain {
+        /// Sandbox name (defaults to last-used sandbox).
+        #[arg(add = ArgValueCompleter::new(completers::complete_sandbox_names))]
+        name: Option<String>,
+    },
+
+    /// Lint the effective policy for a sandbox.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    Lint {
+        /// Sandbox name (defaults to last-used sandbox).
+        #[arg(add = ArgValueCompleter::new(completers::complete_sandbox_names))]
+        name: Option<String>,
+    },
+
+    /// Compare active sandbox policy risk with a candidate policy file.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    ShowRiskDelta {
+        /// Sandbox name (defaults to last-used sandbox).
+        #[arg(add = ArgValueCompleter::new(completers::complete_sandbox_names))]
+        name: Option<String>,
+
+        /// Path to the candidate policy YAML file.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        policy: String,
+    },
+
+    /// Add a capability to the current sandbox policy.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    AddCapability {
+        /// Sandbox name (defaults to last-used sandbox).
+        #[arg(long = "sandbox", add = ArgValueCompleter::new(completers::complete_sandbox_names))]
+        name: Option<String>,
+
+        /// Capability id to add.
+        capability: String,
+
+        /// Path to the capability catalog directory.
+        #[arg(long, value_hint = ValueHint::DirPath, default_value = openshell_policy::DEFAULT_CAPABILITIES_DIR)]
+        capabilities_dir: String,
+
+        /// Submit the updated policy after printing the preview.
+        #[arg(long)]
+        apply: bool,
+
+        /// Print the resulting policy YAML.
+        #[arg(long)]
+        diff: bool,
+
+        /// Wait for the sandbox to load the policy.
+        #[arg(long)]
+        wait: bool,
+
+        /// Timeout for --wait in seconds.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
+
+    /// Replace a capability block in the current sandbox policy.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    ReplaceCapability {
+        /// Sandbox name (defaults to last-used sandbox).
+        #[arg(long = "sandbox", add = ArgValueCompleter::new(completers::complete_sandbox_names))]
+        name: Option<String>,
+
+        /// Capability id to replace.
+        capability: String,
+
+        /// Path to the capability catalog directory.
+        #[arg(long, value_hint = ValueHint::DirPath, default_value = openshell_policy::DEFAULT_CAPABILITIES_DIR)]
+        capabilities_dir: String,
+
+        /// Submit the updated policy after printing the preview.
+        #[arg(long)]
+        apply: bool,
+
+        /// Print the resulting policy YAML.
+        #[arg(long)]
+        diff: bool,
+
+        /// Wait for the sandbox to load the policy.
+        #[arg(long)]
+        wait: bool,
+
+        /// Timeout for --wait in seconds.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
+
+    /// Remove a capability from the current sandbox policy.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    RemoveCapability {
+        /// Sandbox name (defaults to last-used sandbox).
+        #[arg(long = "sandbox", add = ArgValueCompleter::new(completers::complete_sandbox_names))]
+        name: Option<String>,
+
+        /// Capability id to remove.
+        capability: String,
+
+        /// Path to the capability catalog directory.
+        #[arg(long, value_hint = ValueHint::DirPath, default_value = openshell_policy::DEFAULT_CAPABILITIES_DIR)]
+        capabilities_dir: String,
+
+        /// Submit the updated policy after printing the preview.
+        #[arg(long)]
+        apply: bool,
+
+        /// Print the resulting policy YAML.
+        #[arg(long)]
+        diff: bool,
+
+        /// Wait for the sandbox to load the policy.
+        #[arg(long)]
+        wait: bool,
+
+        /// Timeout for --wait in seconds.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
+
+    /// Apply a built-in profile to the current sandbox policy.
+    #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
+    ApplyProfile {
+        /// Sandbox name (defaults to last-used sandbox).
+        #[arg(long = "sandbox", add = ArgValueCompleter::new(completers::complete_sandbox_names))]
+        name: Option<String>,
+
+        /// Profile id to apply.
+        profile: String,
+
+        /// Path to the capability catalog directory.
+        #[arg(long, value_hint = ValueHint::DirPath, default_value = openshell_policy::DEFAULT_CAPABILITIES_DIR)]
+        capabilities_dir: String,
+
+        /// Submit the updated policy after printing the preview.
+        #[arg(long)]
+        apply: bool,
+
+        /// Print the resulting policy YAML.
+        #[arg(long)]
+        diff: bool,
+
+        /// Wait for the sandbox to load the policy.
+        #[arg(long)]
+        wait: bool,
+
+        /// Timeout for --wait in seconds.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
+
     /// Update policy on a live sandbox.
     #[command(help_template = LEAF_HELP_TEMPLATE, next_help_heading = "FLAGS")]
     Set {
@@ -1901,10 +2065,13 @@ async fn main() -> Result<()> {
         Some(Commands::Policy {
             command: Some(policy_cmd),
         }) => {
-            let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
-            let mut tls = tls.with_gateway_name(&ctx.name);
-            apply_edge_auth(&mut tls, &ctx.name);
             match policy_cmd {
+                PolicyCommands::ListCapabilities { capabilities_dir } => {
+                    run::policy_list_capabilities(&capabilities_dir)?;
+                }
+                PolicyCommands::ListProfiles => {
+                    run::policy_list_profiles();
+                }
                 PolicyCommands::Set {
                     name,
                     policy,
@@ -1913,6 +2080,9 @@ async fn main() -> Result<()> {
                     wait,
                     timeout,
                 } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
                     if global {
                         if wait {
                             return Err(miette::miette!(
@@ -1935,12 +2105,141 @@ async fn main() -> Result<()> {
                             .await?;
                     }
                 }
+                PolicyCommands::Explain { name } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
+                    let name = resolve_sandbox_name(name, &ctx.name)?;
+                    run::sandbox_policy_explain(&ctx.endpoint, &name, &tls).await?;
+                }
+                PolicyCommands::Lint { name } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
+                    let name = resolve_sandbox_name(name, &ctx.name)?;
+                    run::sandbox_policy_lint(&ctx.endpoint, &name, &tls).await?;
+                }
+                PolicyCommands::ShowRiskDelta { name, policy } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
+                    let name = resolve_sandbox_name(name, &ctx.name)?;
+                    run::sandbox_policy_show_risk_delta(&ctx.endpoint, &name, &policy, &tls)
+                        .await?;
+                }
+                PolicyCommands::AddCapability {
+                    name,
+                    capability,
+                    capabilities_dir,
+                    apply,
+                    diff,
+                    wait,
+                    timeout,
+                } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
+                    let name = resolve_sandbox_name(name, &ctx.name)?;
+                    run::sandbox_policy_add_capability(
+                        &ctx.endpoint,
+                        &name,
+                        &capability,
+                        &capabilities_dir,
+                        apply,
+                        diff,
+                        wait,
+                        timeout,
+                        &tls,
+                    )
+                    .await?;
+                }
+                PolicyCommands::ReplaceCapability {
+                    name,
+                    capability,
+                    capabilities_dir,
+                    apply,
+                    diff,
+                    wait,
+                    timeout,
+                } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
+                    let name = resolve_sandbox_name(name, &ctx.name)?;
+                    run::sandbox_policy_replace_capability(
+                        &ctx.endpoint,
+                        &name,
+                        &capability,
+                        &capabilities_dir,
+                        apply,
+                        diff,
+                        wait,
+                        timeout,
+                        &tls,
+                    )
+                    .await?;
+                }
+                PolicyCommands::RemoveCapability {
+                    name,
+                    capability,
+                    capabilities_dir,
+                    apply,
+                    diff,
+                    wait,
+                    timeout,
+                } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
+                    let name = resolve_sandbox_name(name, &ctx.name)?;
+                    run::sandbox_policy_remove_capability(
+                        &ctx.endpoint,
+                        &name,
+                        &capability,
+                        &capabilities_dir,
+                        apply,
+                        diff,
+                        wait,
+                        timeout,
+                        &tls,
+                    )
+                    .await?;
+                }
+                PolicyCommands::ApplyProfile {
+                    name,
+                    profile,
+                    capabilities_dir,
+                    apply,
+                    diff,
+                    wait,
+                    timeout,
+                } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
+                    let name = resolve_sandbox_name(name, &ctx.name)?;
+                    run::sandbox_policy_apply_profile(
+                        &ctx.endpoint,
+                        &name,
+                        &profile,
+                        &capabilities_dir,
+                        apply,
+                        diff,
+                        wait,
+                        timeout,
+                        &tls,
+                    )
+                    .await?;
+                }
                 PolicyCommands::Get {
                     name,
                     rev,
                     full,
                     global,
                 } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
                     if global {
                         run::sandbox_policy_get_global(&ctx.endpoint, rev, full, &tls).await?;
                     } else {
@@ -1953,6 +2252,9 @@ async fn main() -> Result<()> {
                     limit,
                     global,
                 } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
                     if global {
                         run::sandbox_policy_list_global(&ctx.endpoint, limit, &tls).await?;
                     } else {
@@ -1961,6 +2263,9 @@ async fn main() -> Result<()> {
                     }
                 }
                 PolicyCommands::Delete { global, yes } => {
+                    let ctx = resolve_gateway(&cli.gateway, &cli.gateway_endpoint)?;
+                    let mut tls = tls.with_gateway_name(&ctx.name);
+                    apply_edge_auth(&mut tls, &ctx.name);
                     if !global {
                         return Err(miette::miette!(
                             "sandbox policy delete is not supported; use --global to remove global policy lock"
@@ -3188,6 +3493,82 @@ mod tests {
                 assert!(yes);
             }
             other => panic!("expected policy delete command, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_add_capability_parses() {
+        let cli = Cli::try_parse_from([
+            "openshell",
+            "policy",
+            "add-capability",
+            "github_readonly",
+            "--apply",
+            "--diff",
+        ])
+        .expect("policy add-capability should parse");
+
+        match cli.command {
+            Some(Commands::Policy {
+                command:
+                    Some(PolicyCommands::AddCapability {
+                        capability,
+                        apply,
+                        diff,
+                        ..
+                    }),
+            }) => {
+                assert_eq!(capability, "github_readonly");
+                assert!(apply);
+                assert!(diff);
+            }
+            other => panic!("expected policy add-capability command, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_apply_profile_parses() {
+        let cli = Cli::try_parse_from([
+            "openshell",
+            "policy",
+            "apply-profile",
+            "medium-dev",
+            "--apply",
+        ])
+        .expect("policy apply-profile should parse");
+
+        match cli.command {
+            Some(Commands::Policy {
+                command:
+                    Some(PolicyCommands::ApplyProfile {
+                        profile, apply, ..
+                    }),
+            }) => {
+                assert_eq!(profile, "medium-dev");
+                assert!(apply);
+            }
+            other => panic!("expected policy apply-profile command, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_show_risk_delta_parses() {
+        let cli = Cli::try_parse_from([
+            "openshell",
+            "policy",
+            "show-risk-delta",
+            "--policy",
+            "candidate.yaml",
+        ])
+        .expect("policy show-risk-delta should parse");
+
+        match cli.command {
+            Some(Commands::Policy {
+                command: Some(PolicyCommands::ShowRiskDelta { policy, .. }),
+            }) => {
+                assert_eq!(policy, "candidate.yaml");
+            }
+            other => panic!("expected policy show-risk-delta command, got: {other:?}"),
         }
     }
 

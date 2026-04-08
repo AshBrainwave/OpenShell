@@ -1,0 +1,21 @@
+id: discord_getme
+title: Discord identity read
+risk: medium
+description: Allow a sandbox to read the caller identity from Discord.
+policy_name: discord_getme
+constraints:
+  - GET only
+  - Limited to /api*/users/@me
+recommended_usage:
+  - Verify Discord bot identity
+block:
+  endpoints:
+    - host: discord.com
+      port: 443
+      protocol: https
+      rules:
+        - allow:
+            method: GET
+            path: /api*/users/@me
+  binaries:
+    - path: /usr/bin/curl
