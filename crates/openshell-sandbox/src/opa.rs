@@ -6,12 +6,24 @@
 //! Wraps [`regorus::Engine`] to evaluate Rego policies for sandbox network
 //! access decisions. The engine is loaded once at sandbox startup and queried
 //! on every proxy CONNECT request.
+//!
+//! In DPU mode, the engine is backed by an OPA REST daemon running on the DPU
+//! ARM (e.g. `http://127.0.0.1:8181`). Policy evaluation is a synchronous
+//! HTTP POST, safe to call from `tokio::task::spawn_blocking`.
 
 use crate::policy::{FilesystemPolicy, LandlockCompatibility, LandlockPolicy, ProcessPolicy};
 use miette::Result;
 use openshell_core::proto::SandboxPolicy as ProtoSandboxPolicy;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+/// Internal backend for OPA evaluation.
+enum OpaInner {
+    /// In-process regorus engine (host mode).
+    Local(Mutex<regorus::Engine>),
+    /// OPA REST daemon (DPU mode). URL is the base, e.g. `http://127.0.0.1:8181`.
+    Rest(String),
+}
 
 /// Baked-in rego rules for OPA policy evaluation.
 /// These rules define the network access decision logic and static config
@@ -62,8 +74,11 @@ pub struct SandboxConfig {
 /// evaluation, so access is serialized via a `Mutex`. This is acceptable
 /// because policy evaluation is fast (microseconds) and contention is low
 /// (one eval per CONNECT request).
+///
+/// In DPU mode (`OpaEngine::rest_only`), policy evaluation is forwarded to
+/// the OPA REST daemon already running on the DPU ARM at port 8181.
 pub struct OpaEngine {
-    engine: Mutex<regorus::Engine>,
+    inner: OpaInner,
 }
 
 impl OpaEngine {
@@ -83,7 +98,7 @@ impl OpaEngine {
             .add_data_json(&data_json)
             .map_err(|e| miette::miette!("{e}"))?;
         Ok(Self {
-            engine: Mutex::new(engine),
+            inner: OpaInner::Local(Mutex::new(engine)),
         })
     }
 
@@ -100,8 +115,20 @@ impl OpaEngine {
             .add_data_json(&data_json)
             .map_err(|e| miette::miette!("{e}"))?;
         Ok(Self {
-            engine: Mutex::new(engine),
+            inner: OpaInner::Local(Mutex::new(engine)),
         })
+    }
+
+    /// Create an OPA engine backed by an OPA REST daemon.
+    ///
+    /// Used in DPU mode where the OPA daemon runs on the DPU ARM at
+    /// `http://127.0.0.1:8181`. Policy evaluation is a synchronous HTTP POST
+    /// to `{url}/v1/data/openshell/allow`. Safe to call from
+    /// `tokio::task::spawn_blocking`.
+    pub fn rest_only(url: String) -> Self {
+        Self {
+            inner: OpaInner::Rest(url),
+        }
     }
 
     /// Create OPA engine from a typed proto policy.
@@ -150,7 +177,7 @@ impl OpaEngine {
             .add_data_json(&data_json)
             .map_err(|e| miette::miette!("{e}"))?;
         Ok(Self {
-            engine: Mutex::new(engine),
+            inner: OpaInner::Local(Mutex::new(engine)),
         })
     }
 
@@ -160,6 +187,26 @@ impl OpaEngine {
     /// `allow_network` rule, and returns a `PolicyDecision` with the result,
     /// deny reason, and matched policy name.
     pub fn evaluate_network(&self, input: &NetworkInput) -> Result<PolicyDecision> {
+        // In REST mode, delegate to evaluate_network_action and adapt result.
+        if let OpaInner::Rest(url) = &self.inner {
+            return match evaluate_via_rest(url, input)? {
+                NetworkAction::Allow { matched_policy } => Ok(PolicyDecision {
+                    allowed: true,
+                    reason: String::new(),
+                    matched_policy,
+                }),
+                NetworkAction::Deny { reason } => Ok(PolicyDecision {
+                    allowed: false,
+                    reason,
+                    matched_policy: None,
+                }),
+            };
+        }
+
+        let OpaInner::Local(engine_mutex) = &self.inner else {
+            unreachable!()
+        };
+
         let ancestor_strs: Vec<String> = input
             .ancestors
             .iter()
@@ -182,8 +229,7 @@ impl OpaEngine {
             }
         });
 
-        let mut engine = self
-            .engine
+        let mut engine = engine_mutex
             .lock()
             .map_err(|_| miette::miette!("OPA engine lock poisoned"))?;
 
@@ -221,7 +267,18 @@ impl OpaEngine {
     ///
     /// Uses the OPA `network_action` rule which returns one of:
     /// `"allow"` or `"deny"`.
+    ///
+    /// In DPU mode, forwards the request to the OPA REST daemon.
     pub fn evaluate_network_action(&self, input: &NetworkInput) -> Result<NetworkAction> {
+        // DPU REST mode: POST to the OPA daemon running on DPU ARM.
+        if let OpaInner::Rest(url) = &self.inner {
+            return evaluate_via_rest(url, input);
+        }
+
+        let OpaInner::Local(engine_mutex) = &self.inner else {
+            unreachable!()
+        };
+
         let ancestor_strs: Vec<String> = input
             .ancestors
             .iter()
@@ -244,8 +301,7 @@ impl OpaEngine {
             }
         });
 
-        let mut engine = self
-            .engine
+        let mut engine = engine_mutex
             .lock()
             .map_err(|_| miette::miette!("OPA engine lock poisoned"))?;
 
@@ -287,12 +343,16 @@ impl OpaEngine {
     /// expansion) to maintain consistency with `from_strings()`.
     pub fn reload(&self, policy: &str, data_yaml: &str) -> Result<()> {
         let new = Self::from_strings(policy, data_yaml)?;
-        let new_engine = new
-            .engine
+        let OpaInner::Local(new_mutex) = new.inner else {
+            return Err(miette::miette!("reload not supported in REST mode"));
+        };
+        let new_engine = new_mutex
             .into_inner()
             .map_err(|_| miette::miette!("lock poisoned on new engine"))?;
-        let mut engine = self
-            .engine
+        let OpaInner::Local(engine_mutex) = &self.inner else {
+            return Err(miette::miette!("reload not supported in REST mode"));
+        };
+        let mut engine = engine_mutex
             .lock()
             .map_err(|_| miette::miette!("OPA engine lock poisoned"))?;
         *engine = new_engine;
@@ -306,14 +366,17 @@ impl OpaEngine {
     /// validation guarantees as initial load. Atomically replaces the inner
     /// engine on success; on failure the previous engine is untouched (LKG).
     pub fn reload_from_proto(&self, proto: &ProtoSandboxPolicy) -> Result<()> {
-        // Build a complete new engine through the same validated pipeline.
         let new = Self::from_proto(proto)?;
-        let new_engine = new
-            .engine
+        let OpaInner::Local(new_mutex) = new.inner else {
+            return Err(miette::miette!("reload not supported in REST mode"));
+        };
+        let new_engine = new_mutex
             .into_inner()
             .map_err(|_| miette::miette!("lock poisoned on new engine"))?;
-        let mut engine = self
-            .engine
+        let OpaInner::Local(engine_mutex) = &self.inner else {
+            return Err(miette::miette!("reload not supported in REST mode"));
+        };
+        let mut engine = engine_mutex
             .lock()
             .map_err(|_| miette::miette!("OPA engine lock poisoned"))?;
         *engine = new_engine;
@@ -326,8 +389,10 @@ impl OpaEngine {
     /// data and converts them into the Rust policy structs used by the sandbox
     /// runtime for filesystem preparation, Landlock setup, and privilege dropping.
     pub fn query_sandbox_config(&self) -> Result<SandboxConfig> {
-        let mut engine = self
-            .engine
+        let OpaInner::Local(engine_mutex) = &self.inner else {
+            return Err(miette::miette!("query_sandbox_config not supported in REST mode"));
+        };
+        let mut engine = engine_mutex
             .lock()
             .map_err(|_| miette::miette!("OPA engine lock poisoned"))?;
 
@@ -362,6 +427,16 @@ impl OpaEngine {
     /// to get the full endpoint object for the matched policy. Returns the raw
     /// `regorus::Value` which can be parsed by `l7::parse_l7_config()`.
     pub fn query_endpoint_config(&self, input: &NetworkInput) -> Result<Option<regorus::Value>> {
+        // In REST mode, L7 endpoint config is not available; return None so
+        // the proxy falls back to default SSRF protection without L7 inspection.
+        if matches!(self.inner, OpaInner::Rest(_)) {
+            return Ok(None);
+        }
+
+        let OpaInner::Local(engine_mutex) = &self.inner else {
+            unreachable!()
+        };
+
         let ancestor_strs: Vec<String> = input
             .ancestors
             .iter()
@@ -384,8 +459,7 @@ impl OpaEngine {
             }
         });
 
-        let mut engine = self
-            .engine
+        let mut engine = engine_mutex
             .lock()
             .map_err(|_| miette::miette!("OPA engine lock poisoned"))?;
 
@@ -422,12 +496,60 @@ impl OpaEngine {
     /// With the `arc` feature enabled, this shares compiled policy via Arc
     /// and only duplicates interpreter state (~microseconds). The cloned
     /// engine can be used without Mutex contention.
+    ///
+    /// Returns an error in REST mode (no local engine to clone).
     pub fn clone_engine_for_tunnel(&self) -> Result<regorus::Engine> {
-        let engine = self
-            .engine
+        let OpaInner::Local(engine_mutex) = &self.inner else {
+            return Err(miette::miette!("clone_engine_for_tunnel not supported in REST mode"));
+        };
+        let engine = engine_mutex
             .lock()
             .map_err(|_| miette::miette!("OPA engine lock poisoned"))?;
         Ok(engine.clone())
+    }
+}
+
+/// Evaluate a policy decision by calling the OPA REST daemon.
+///
+/// Posts to `{url}/v1/data/openshell/allow` with the DPU input format:
+/// `{"binary_path": "...", "destination_host": "...", "destination_port": N}`.
+/// The method field is omitted; the DPU Rego treats absent method as allow-any.
+///
+/// Called from `spawn_blocking` — synchronous HTTP is intentional.
+fn evaluate_via_rest(url: &str, input: &NetworkInput) -> Result<NetworkAction> {
+    let input_doc = serde_json::json!({
+        "binary_path": input.binary_path.to_string_lossy(),
+        "destination_host": input.host,
+        "destination_port": input.port,
+    });
+    let body = serde_json::json!({ "input": input_doc }).to_string();
+    let endpoint = format!("{}/v1/data/openshell/allow", url.trim_end_matches('/'));
+
+    let response = ureq::post(&endpoint)
+        .set("Content-Type", "application/json")
+        .send_string(&body)
+        .map_err(|e| miette::miette!("OPA REST call to {endpoint} failed: {e}"))?;
+
+    let resp_str = response
+        .into_string()
+        .map_err(|e| miette::miette!("OPA REST response read failed: {e}"))?;
+
+    let resp_json: serde_json::Value = serde_json::from_str(&resp_str)
+        .map_err(|e| miette::miette!("OPA REST response parse failed: {e}"))?;
+
+    match resp_json.get("result").and_then(|v| v.as_bool()) {
+        Some(true) => Ok(NetworkAction::Allow {
+            matched_policy: None,
+        }),
+        Some(false) => Ok(NetworkAction::Deny {
+            reason: "denied by DPU OPA policy".to_string(),
+        }),
+        None => Ok(NetworkAction::Deny {
+            reason: format!(
+                "OPA REST: unexpected response: {:.80}",
+                resp_str
+            ),
+        }),
     }
 }
 

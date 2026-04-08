@@ -14,6 +14,10 @@ repository.workspace = true
 name = "openshell-sandbox"
 path = "src/main.rs"
 
+[[bin]]
+name = "openshell-dpu-proxy"
+path = "src/dpu_proxy.rs"
+
 [dependencies]
 openshell-core = { path = "../openshell-core" }
 openshell-ocsf = { path = "../openshell-ocsf" }
@@ -58,6 +62,9 @@ base64 = { workspace = true }
 
 # IP network / CIDR parsing
 ipnet = "2"
+
+# Sync HTTP client for OPA REST calls from spawn_blocking (DPU mode)
+ureq = "2"
 
 # Serialization
 serde_json = { workspace = true }

@@ -881,6 +881,39 @@ fn evaluate_opa_tcp(
         );
     }
 
+    // DPU/remote-proxy mode: u32::MAX sentinel means the connecting agent is on
+    // the remote host — /proc/net/tcp cannot resolve its identity from here.
+    // Skip identity resolution and evaluate OPA with destination-only input.
+    if pid == u32::MAX {
+        let input = NetworkInput {
+            host: host.to_string(),
+            port,
+            binary_path: std::path::PathBuf::new(),
+            binary_sha256: String::new(),
+            ancestors: vec![],
+            cmdline_paths: vec![],
+        };
+        let action = match engine.evaluate_network_action(&input) {
+            Ok(a) => a,
+            Err(e) => {
+                return deny(
+                    format!("OPA evaluation failed: {e}"),
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                )
+            }
+        };
+        return ConnectDecision {
+            action,
+            binary: None,
+            binary_pid: None,
+            ancestors: vec![],
+            cmdline_paths: vec![],
+        };
+    }
+
     let total_start = std::time::Instant::now();
     let peer_port = peer_addr.port();
 

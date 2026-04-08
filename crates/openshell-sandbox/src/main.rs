@@ -94,6 +94,24 @@ struct Args {
     /// Port for health check endpoint.
     #[arg(long, default_value = "8080")]
     health_port: u16,
+
+    /// DPU mode: OPA REST daemon URL on the DPU ARM (e.g. `http://127.0.0.1:8181`).
+    /// When set, policy evaluation is forwarded to this daemon instead of using
+    /// an in-process regorus engine. Skips network namespace creation so the
+    /// proxy can listen on the DPU's physical IP.
+    #[arg(long, env = "OPENSHELL_DPU_OPA_URL")]
+    dpu_opa_url: Option<String>,
+
+    /// DPU mode: path to a JSON credentials file (`{"ANTHROPIC_API_KEY": "sk-..."}`).
+    /// When set, credentials are loaded from this file instead of fetched via gRPC.
+    #[arg(long, env = "OPENSHELL_DPU_CREDENTIALS")]
+    dpu_credentials: Option<String>,
+
+    /// Explicit proxy listen address (e.g. `0.0.0.0:8080`).
+    /// Bypasses the loopback-only restriction. Required in DPU mode so host
+    /// agents can reach the proxy at the DPU's IP (`192.168.100.2:8080`).
+    #[arg(long, env = "OPENSHELL_LISTEN")]
+    listen: Option<String>,
 }
 
 #[tokio::main]
@@ -226,6 +244,9 @@ async fn main() -> Result<()> {
         args.health_port,
         args.inference_routes,
         ocsf_enabled,
+        args.dpu_opa_url,
+        args.dpu_credentials,
+        args.listen,
     )
     .await?;
 

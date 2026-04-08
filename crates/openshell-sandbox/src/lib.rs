@@ -214,6 +214,15 @@ pub async fn run_sandbox(
     _health_port: u16,
     inference_routes: Option<String>,
     ocsf_enabled: Arc<std::sync::atomic::AtomicBool>,
+    // DPU mode: OPA REST daemon URL (e.g. http://127.0.0.1:8181).
+    // When set, evaluation is forwarded to the daemon; netns creation is skipped.
+    dpu_opa_url: Option<String>,
+    // DPU mode: path to flat JSON credentials file {"ANTHROPIC_API_KEY": "sk-..."}.
+    // When set, credentials are loaded from file instead of fetched via gRPC.
+    dpu_credentials: Option<String>,
+    // Explicit proxy listen address (e.g. 0.0.0.0:8080).
+    // Bypasses loopback-only restriction. Required in DPU mode.
+    listen_addr: Option<String>,
 ) -> Result<i32> {
     let (program, args) = command
         .split_first()
@@ -247,24 +256,72 @@ pub async fn run_sandbox(
     // Load policy and initialize OPA engine
     let openshell_endpoint_for_proxy = openshell_endpoint.clone();
     let sandbox_name_for_agg = sandbox.clone();
-    let (policy, opa_engine) = load_policy(
-        sandbox_id.clone(),
-        sandbox,
-        openshell_endpoint.clone(),
-        policy_rules,
-        policy_data,
-    )
-    .await?;
+    let (policy, opa_engine) = if let Some(ref rest_url) = dpu_opa_url {
+        // DPU mode: create a minimal proxy policy and a REST-backed OPA engine.
+        // No local policy files or gRPC are needed — the OPA daemon on the DPU
+        // ARM handles all policy evaluation at 127.0.0.1:8181.
+        info!(opa_rest_url = %rest_url, "DPU mode: using OPA REST daemon for policy evaluation");
+        let policy = crate::policy::SandboxPolicy {
+            version: 1,
+            filesystem: crate::policy::FilesystemPolicy::default(),
+            network: crate::policy::NetworkPolicy {
+                mode: crate::policy::NetworkMode::Proxy,
+                proxy: Some(crate::policy::ProxyPolicy { http_addr: None }),
+            },
+            landlock: crate::policy::LandlockPolicy::default(),
+            process: crate::policy::ProcessPolicy::default(),
+        };
+        let engine = crate::opa::OpaEngine::rest_only(rest_url.clone());
+        (policy, Some(Arc::new(engine)))
+    } else {
+        load_policy(
+            sandbox_id.clone(),
+            sandbox,
+            openshell_endpoint.clone(),
+            policy_rules,
+            policy_data,
+        )
+        .await?
+    };
 
     // Validate that the required "sandbox" user exists in this image.
-    // All sandbox images must include this user for privilege dropping.
+    // Skipped in DPU mode — the proxy runs on the DPU ARM where no "sandbox"
+    // user is required; the DPU is a trusted enforcement domain, not a container.
     #[cfg(unix)]
-    validate_sandbox_user(&policy)?;
+    if dpu_opa_url.is_none() {
+        validate_sandbox_user(&policy)?;
+    }
 
     // Fetch provider environment variables from the server.
     // This is done after loading the policy so the sandbox can still start
     // even if provider env fetch fails (graceful degradation).
-    let provider_env = if let (Some(id), Some(endpoint)) = (&sandbox_id, &openshell_endpoint) {
+    let provider_env = if let Some(ref creds_path) = dpu_credentials {
+        // DPU mode: load credentials from a local JSON file.
+        // File format: flat map of env var name → value, e.g.:
+        //   {"ANTHROPIC_API_KEY": "sk-ant-...", "OPENAI_API_KEY": "sk-..."}
+        match std::fs::read_to_string(creds_path) {
+            Ok(json) => {
+                match serde_json::from_str::<std::collections::HashMap<String, String>>(&json) {
+                    Ok(creds) => {
+                        info!(
+                            path = %creds_path,
+                            key_count = creds.len(),
+                            "Loaded credentials from DPU vault file"
+                        );
+                        creds
+                    }
+                    Err(e) => {
+                        warn!(error = %e, path = %creds_path, "Failed to parse credentials file, continuing without");
+                        std::collections::HashMap::new()
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, path = %creds_path, "Failed to read credentials file, continuing without");
+                std::collections::HashMap::new()
+            }
+        }
+    } else if let (Some(id), Some(endpoint)) = (&sandbox_id, &openshell_endpoint) {
         match grpc_client::fetch_provider_environment(endpoint, id).await {
             Ok(env) => {
                 ocsf_emit!(
@@ -367,11 +424,14 @@ pub async fn run_sandbox(
         (None, None)
     };
 
-    // Create network namespace for proxy mode (Linux only)
-    // This must be created before the proxy AND SSH server so that SSH
-    // sessions can enter the namespace for network isolation.
+    // Create network namespace for proxy mode (Linux only).
+    // Skipped in DPU mode: the DPU ARM IS the enforcement domain; agents reach
+    // the proxy via the DPU's physical IP. No netns isolation of the proxy itself
+    // is needed or desired.
     #[cfg(target_os = "linux")]
-    let netns = if matches!(policy.network.mode, NetworkMode::Proxy) {
+    let netns = if dpu_opa_url.is_some() {
+        None
+    } else if matches!(policy.network.mode, NetworkMode::Proxy) {
         match NetworkNamespace::create() {
             Ok(ns) => {
                 // Install bypass detection rules (iptables LOG + REJECT).
@@ -432,16 +492,36 @@ pub async fn run_sandbox(
             miette::miette!("Proxy mode requires an identity cache (OPA engine must be configured)")
         })?;
 
-        // If we have a network namespace, bind to the veth host IP so sandboxed
-        // processes can reach the proxy via TCP.
+        // Determine the proxy bind address:
+        // - DPU mode / explicit --listen: bind to the provided address (bypasses
+        //   the loopback-only restriction in ProxyHandle::start_with_bind_addr).
+        // - Network namespace mode: bind to the veth host IP so sandboxed
+        //   processes inside the namespace can reach the proxy.
+        // - Default: fall through to ProxyHandle's loopback:3128 default.
         #[cfg(target_os = "linux")]
-        let bind_addr = netns.as_ref().map(|ns| {
-            let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
-            SocketAddr::new(ns.host_ip(), port)
-        });
+        let bind_addr: Option<SocketAddr> = if let Some(ref addr_str) = listen_addr {
+            Some(
+                addr_str
+                    .parse()
+                    .map_err(|e| miette::miette!("Invalid --listen address '{addr_str}': {e}"))?,
+            )
+        } else {
+            netns.as_ref().map(|ns| {
+                let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
+                SocketAddr::new(ns.host_ip(), port)
+            })
+        };
 
         #[cfg(not(target_os = "linux"))]
-        let bind_addr: Option<SocketAddr> = None;
+        let bind_addr: Option<SocketAddr> = if let Some(ref addr_str) = listen_addr {
+            Some(
+                addr_str
+                    .parse()
+                    .map_err(|e| miette::miette!("Invalid --listen address '{addr_str}': {e}"))?,
+            )
+        } else {
+            None
+        };
 
         // Build inference context for local routing of intercepted inference calls.
         let inference_ctx = build_inference_context(
@@ -820,6 +900,133 @@ pub async fn run_sandbox(
 
 /// Build an inference context for local routing, if route sources are available.
 ///
+/// Run a standalone TLS proxy on the DPU ARM.
+///
+/// This is the entry point for the `openshell-dpu-proxy` binary. It starts
+/// only the proxy component — no sandboxing, no process supervision, no netns.
+///
+/// - Policy evaluation is forwarded to the OPA REST daemon at `opa_url`
+/// - Credentials are loaded from `credentials_path` (flat JSON: `{"ENV": "val"}`)
+/// - TLS is terminated on the DPU; the ephemeral CA cert is written to
+///   `ca_cert_out` so operators can install it in the host agent's trust store
+/// - Inference traffic to `inference.local` is routed via `inference_routes`
+///
+/// The proxy blocks until the process receives SIGINT/SIGTERM.
+pub async fn run_dpu_proxy(
+    listen_addr: String,
+    opa_url: String,
+    credentials_path: Option<String>,
+    inference_routes: Option<String>,
+    ca_cert_out: Option<String>,
+) -> Result<()> {
+    // OPA REST engine — every CONNECT is evaluated via POST to the OPA daemon.
+    let opa_engine = Arc::new(OpaEngine::rest_only(opa_url.clone()));
+    info!(opa_url = %opa_url, "DPU proxy: using OPA REST daemon");
+
+    let identity_cache = Arc::new(crate::identity::BinaryIdentityCache::new());
+    // u32::MAX is a sentinel meaning "DPU/remote mode": skip /proc/net/tcp identity
+    // resolution (the connecting agent is on the remote host, not on this DPU) and
+    // forward destination-only input directly to OPA.
+    let entrypoint_pid = Arc::new(AtomicU32::new(u32::MAX));
+
+    // Credentials: load from file → set as env vars (for inference router's
+    // api_key_env resolution) AND feed into SecretResolver (for header rewriting).
+    let provider_env: std::collections::HashMap<String, String> =
+        if let Some(ref path) = credentials_path {
+            match std::fs::read_to_string(path) {
+                Ok(json) => match serde_json::from_str(&json) {
+                    Ok(creds) => {
+                        info!(path = %path, "DPU proxy: loaded credentials from file");
+                        // Set as process env vars so the inference router can resolve
+                        // api_key_env fields (e.g. NVIDIA_API_KEY) via std::env::var.
+                        for (k, v) in &creds {
+                            // SAFETY: called before any threads that read env vars
+                            // are spawned (proxy and router start after this block).
+                            #[allow(unused_unsafe)]
+                            unsafe { std::env::set_var(k, v) };
+                        }
+                        creds
+                    }
+                    Err(e) => {
+                        warn!(error = %e, path = %path, "DPU proxy: failed to parse credentials file");
+                        std::collections::HashMap::new()
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, path = %path, "DPU proxy: failed to read credentials file");
+                    std::collections::HashMap::new()
+                }
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+    let (_, secret_resolver) = SecretResolver::from_provider_env(provider_env);
+    let secret_resolver = secret_resolver.map(Arc::new);
+
+    // TLS: generate ephemeral CA for MITM. Write cert to ca_cert_out so the
+    // operator can install it in the host agent's trust store.
+    let tls_state = match crate::l7::tls::SandboxCa::generate() {
+        Ok(ca) => {
+            // Write CA cert so the operator can copy it to the host.
+            let cert_path = ca_cert_out
+                .as_deref()
+                .unwrap_or("/tmp/openshell-dpu-ca.crt");
+            if let Err(e) = std::fs::write(cert_path, ca.cert_pem()) {
+                warn!(error = %e, path = %cert_path, "DPU proxy: failed to write CA cert");
+            } else {
+                info!(
+                    path = %cert_path,
+                    "DPU proxy: CA cert written — install on host with:\n  \
+                     sudo cp {cert_path} /usr/local/share/ca-certificates/openshell-dpu-ca.crt\n  \
+                     sudo update-ca-certificates"
+                );
+            }
+            let upstream_config = crate::l7::tls::build_upstream_client_config();
+            let cert_cache = crate::l7::tls::CertCache::new(ca);
+            Some(Arc::new(crate::l7::tls::ProxyTlsState::new(
+                cert_cache,
+                upstream_config,
+            )))
+        }
+        Err(e) => {
+            warn!(error = %e, "DPU proxy: failed to generate CA, TLS termination disabled");
+            None
+        }
+    };
+
+    // Inference routing.
+    let inference_ctx =
+        build_inference_context(None, None, inference_routes.as_deref()).await?;
+
+    // Bind address — passed as Some() to bypass the loopback-only check.
+    let bind_addr: SocketAddr = listen_addr
+        .parse()
+        .map_err(|e| miette::miette!("Invalid --listen address '{listen_addr}': {e}"))?;
+    info!(addr = %bind_addr, "DPU proxy: starting");
+
+    let proxy_policy = crate::policy::ProxyPolicy { http_addr: None };
+    let _proxy = proxy::ProxyHandle::start_with_bind_addr(
+        &proxy_policy,
+        Some(bind_addr),
+        opa_engine,
+        identity_cache,
+        entrypoint_pid,
+        tls_state,
+        inference_ctx,
+        secret_resolver,
+        None, // no denial aggregator in standalone mode
+    )
+    .await?;
+
+    info!("DPU proxy running — press Ctrl-C to stop");
+    tokio::signal::ctrl_c()
+        .await
+        .into_diagnostic()
+        .map_err(|e| miette::miette!("Signal error: {e}"))?;
+    info!("DPU proxy shutting down");
+    Ok(())
+}
+
 /// Route sources (in priority order):
 /// 1. Inference routes file (standalone mode) — always takes precedence
 /// 2. Cluster bundle (fetched from gateway via gRPC)
