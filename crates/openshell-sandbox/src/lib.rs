@@ -1197,6 +1197,7 @@ pub async fn run_dpu_proxy_cc(
 fn fetch_routes_from_opa(
     opa_url: &str,
 ) -> Option<Vec<openshell_router::config::ResolvedRoute>> {
+    use openshell_core::inference::AuthHeader;
     use openshell_router::config::{DEFAULT_ROUTE_TIMEOUT, ResolvedRoute};
 
     let url = format!(
@@ -1230,63 +1231,90 @@ fn fetch_routes_from_opa(
     };
 
     // result = null means OPA has the path but no data yet.
-    let data = match body.get("result") {
+    let result = match body.get("result") {
         Some(v) if !v.is_null() => v,
         _ => return None,
     };
 
-    let str_field = |key: &str| -> Option<String> {
-        data.get(key)?.as_str().map(str::to_owned)
+    // Accept either an array of route objects or a single route object (legacy).
+    let items: Vec<&serde_json::Value> = if let Some(arr) = result.as_array() {
+        arr.iter().collect()
+    } else {
+        vec![result]
     };
 
-    let endpoint = str_field("endpoint")?;
-    let model = str_field("model")?;
+    let mut routes = Vec::new();
+    for data in items {
+        let str_field = |key: &str| -> Option<String> {
+            data.get(key)?.as_str().map(str::to_owned)
+        };
 
-    let api_key = if let Some(key) = str_field("api_key") {
-        key
-    } else if let Some(env_var) = str_field("api_key_env") {
-        match std::env::var(&env_var) {
-            Ok(k) => k,
-            Err(_) => {
-                warn!(env_var = %env_var, "comch: OPA inference_routes api_key_env not set");
-                return None;
+        let endpoint = match str_field("endpoint") {
+            Some(e) => e,
+            None => {
+                warn!("comch: OPA inference_routes entry missing endpoint, skipping");
+                continue;
             }
-        }
-    } else {
-        warn!("comch: OPA inference_routes has neither api_key nor api_key_env");
-        return None;
-    };
+        };
+        // model is optional (e.g. search APIs have no model concept).
+        let model = str_field("model").unwrap_or_default();
 
-    let raw_protocols: Vec<String> = data
-        .get("protocols")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
+        let api_key = if let Some(key) = str_field("api_key") {
+            key
+        } else if let Some(env_var) = str_field("api_key_env") {
+            match std::env::var(&env_var) {
+                Ok(k) => k,
+                Err(_) => {
+                    warn!(env_var = %env_var, "comch: OPA inference_routes api_key_env not set, skipping route");
+                    continue;
+                }
+            }
+        } else {
+            warn!(endpoint = %endpoint, "comch: OPA inference_routes has neither api_key nor api_key_env, skipping");
+            continue;
+        };
 
-    let protocols = if raw_protocols.is_empty() {
-        vec!["openai_chat_completions".to_string()]
-    } else {
-        openshell_core::inference::normalize_protocols(&raw_protocols)
-    };
+        let raw_protocols: Vec<String> = data
+            .get("protocols")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-    let provider_type = str_field("provider_type").unwrap_or_default();
-    let (auth, default_headers) =
-        openshell_core::inference::auth_for_provider_type(&provider_type);
+        let protocols = if raw_protocols.is_empty() {
+            vec!["openai_chat_completions".to_string()]
+        } else {
+            openshell_core::inference::normalize_protocols(&raw_protocols)
+        };
 
-    Some(vec![ResolvedRoute {
-        name: str_field("name").unwrap_or_else(|| "inference.local".to_string()),
-        endpoint,
-        model,
-        api_key,
-        protocols,
-        auth,
-        default_headers,
-        timeout: DEFAULT_ROUTE_TIMEOUT,
-    }])
+        // auth_header overrides provider_type — allows custom headers like
+        // "X-Subscription-Token" (Brave Search) without adding a provider profile.
+        let provider_type = str_field("provider_type").unwrap_or_default();
+        let (default_auth, default_headers) =
+            openshell_core::inference::auth_for_provider_type(&provider_type);
+        let auth = if let Some(header_name) = str_field("auth_header") {
+            // Leak to &'static str — one allocation per route, acceptable at startup.
+            AuthHeader::Custom(Box::leak(header_name.into_boxed_str()))
+        } else {
+            default_auth
+        };
+
+        routes.push(ResolvedRoute {
+            name: str_field("name").unwrap_or_else(|| endpoint.clone()),
+            endpoint,
+            model,
+            api_key,
+            protocols,
+            auth,
+            default_headers,
+            timeout: DEFAULT_ROUTE_TIMEOUT,
+        });
+    }
+
+    if routes.is_empty() { None } else { Some(routes) }
 }
 
 /// Build an [`InferenceContext`] for the Comm Channel (DPU) proxy.
