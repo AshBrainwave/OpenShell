@@ -48,11 +48,13 @@ typedef void cc_server_t;
 typedef void (*cc_msg_cb_t)(uint64_t, const uint8_t *, uint32_t, void *);
 typedef void (*cc_conn_cb_t)(uint64_t, void *);
 
-cc_server_t *cc_server_create(const char *pci, const char *svc,
+cc_server_t *cc_server_create(const char *pci, const char *rep_pci,
+                               const char *svc,
                                cc_msg_cb_t msg, cc_conn_cb_t conn,
                                cc_conn_cb_t disconn, void *ud)
 {
-    (void)pci; (void)svc; (void)msg; (void)conn; (void)disconn; (void)ud;
+    (void)pci; (void)rep_pci; (void)svc;
+    (void)msg; (void)conn; (void)disconn; (void)ud;
     return NULL;
 }
 int  cc_server_send(cc_server_t *s, uint64_t cid, const uint8_t *b, uint32_t l)

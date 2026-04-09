@@ -1051,6 +1051,7 @@ pub async fn run_dpu_proxy(
 /// ```
 pub async fn run_dpu_proxy_cc(
     pci_addr: String,
+    rep_pci_addr: String,
     service_name: String,
     opa_url: String,
     credentials_path: Option<String>,
@@ -1126,7 +1127,7 @@ pub async fn run_dpu_proxy_cc(
 
     // Start the Comm Channel listener
     let mut listener =
-        ComchListener::start(&pci_addr, &service_name, opa_engine.clone())
+        ComchListener::start(&pci_addr, &rep_pci_addr, &service_name, opa_engine.clone())
             .map_err(|e| miette::miette!("Comm Channel server start failed: {e}"))?;
 
     info!(

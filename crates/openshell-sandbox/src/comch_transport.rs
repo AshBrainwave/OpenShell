@@ -272,6 +272,7 @@ type CcConnCb = unsafe extern "C" fn(conn_id: u64, userdata: *mut std::ffi::c_vo
 unsafe extern "C" {
     fn cc_server_create(
         pci_addr: *const std::ffi::c_char,
+        rep_pci_addr: *const std::ffi::c_char,
         service_name: *const std::ffi::c_char,
         msg_cb: CcMsgCb,
         conn_cb: CcConnCb,
@@ -423,6 +424,7 @@ impl ComchListener {
     ///  2. A Tokio task that processes inbound OCPP messages via OPA.
     pub fn start(
         pci_addr: &str,
+        rep_pci_addr: &str,
         service_name: &str,
         opa_engine: Arc<crate::opa::OpaEngine>,
     ) -> Result<Self, String> {
@@ -441,12 +443,15 @@ impl ComchListener {
 
         let pci_c =
             CString::new(pci_addr).map_err(|e| format!("invalid pci_addr: {e}"))?;
+        let rep_c =
+            CString::new(rep_pci_addr).map_err(|e| format!("invalid rep_pci_addr: {e}"))?;
         let svc_c =
             CString::new(service_name).map_err(|e| format!("invalid service_name: {e}"))?;
 
         let raw_server = unsafe {
             cc_server_create(
                 pci_c.as_ptr(),
+                rep_c.as_ptr(),
                 svc_c.as_ptr(),
                 trampoline_msg,
                 trampoline_connected,
@@ -457,7 +462,7 @@ impl ComchListener {
 
         if raw_server.is_null() {
             return Err(format!(
-                "cc_server_create failed for device {pci_addr} service {service_name}"
+                "cc_server_create failed for device {pci_addr} rep {rep_pci_addr} service {service_name}"
             ));
         }
 

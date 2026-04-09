@@ -16,7 +16,7 @@
 //!
 //! Usage (Comm Channel mode — untrusted-host, production):
 //!   openshell-dpu-proxy --mode comch \
-//!     --pci 03:00.0 \
+//!     --pci 03:00.0 --rep-pci b3:00.0 \
 //!     --opa-url http://127.0.0.1:8181 \
 //!     --credentials /home/ubuntu/openshell-dpu/credentials.json
 
@@ -64,6 +64,11 @@ struct Args {
     /// [comch] PCI address of the BlueField device (e.g. 03:00.0).
     #[arg(long, default_value = "03:00.0", env = "OPENSHELL_PCI_ADDR")]
     pci: String,
+
+    /// [comch] PCI address of the host-side representor as seen from DPU (e.g. b3:00.0).
+    /// Run `sudo /opt/mellanox/doca/tools/doca_pci_info` on the DPU to find it.
+    #[arg(long, default_value = "b3:00.0", env = "OPENSHELL_REP_PCI_ADDR")]
+    rep_pci: String,
 
     /// [comch] DOCA Comm Channel service name (must match host shim).
     #[arg(
@@ -132,12 +137,14 @@ async fn main() -> Result<()> {
         Mode::Comch => {
             info!(
                 pci = %args.pci,
+                rep_pci = %args.rep_pci,
                 service = %args.service,
                 opa_url = %args.opa_url,
                 "Starting OpenShell DPU proxy (comch/PCIe mode)"
             );
             run_dpu_proxy_cc(
                 args.pci,
+                args.rep_pci,
                 args.service,
                 args.opa_url,
                 args.credentials,
