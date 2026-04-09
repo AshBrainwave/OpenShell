@@ -1214,10 +1214,17 @@ fn fetch_routes_from_opa(
 
     // Parse as serde_json::Value — avoids needing serde as a direct dep.
     // OPA wraps all data responses in {"result": <value>}.
-    let body: serde_json::Value = match resp.into_json() {
+    let text = match resp.into_string() {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(error = %e, "comch: failed to read OPA inference_routes response");
+            return None;
+        }
+    };
+    let body: serde_json::Value = match serde_json::from_str(&text) {
         Ok(b) => b,
         Err(e) => {
-            warn!(error = %e, "comch: failed to parse OPA inference_routes response");
+            warn!(error = %e, "comch: failed to parse OPA inference_routes JSON");
             return None;
         }
     };
