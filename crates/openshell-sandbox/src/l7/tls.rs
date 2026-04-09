@@ -197,6 +197,43 @@ pub async fn tls_connect_upstream(
     Ok(tls_stream)
 }
 
+/// Accept TLS from any `AsyncRead + AsyncWrite` stream (generic variant).
+///
+/// Used by the Comm Channel transport where the client stream is a `TunnelStream`
+/// rather than a `TcpStream`.
+pub async fn tls_terminate_generic<S>(
+    client: S,
+    tls_state: &ProxyTlsState,
+    hostname: &str,
+) -> Result<impl AsyncRead + AsyncWrite + Unpin + Send>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let acceptor = tls_state.acceptor_for(hostname)?;
+    let tls_stream = acceptor.accept(client).await.into_diagnostic()?;
+    Ok(tls_stream)
+}
+
+/// Connect TLS to an upstream server using any `AsyncRead + AsyncWrite` stream.
+///
+/// Generic variant of `tls_connect_upstream` for non-`TcpStream` transports.
+pub async fn tls_connect_upstream_generic<S>(
+    upstream: S,
+    hostname: &str,
+    client_config: &Arc<ClientConfig>,
+) -> Result<impl AsyncRead + AsyncWrite + Unpin + Send>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let connector = TlsConnector::from(Arc::clone(client_config));
+    let server_name = ServerName::try_from(hostname.to_string()).into_diagnostic()?;
+    let tls_stream = connector
+        .connect(server_name, upstream)
+        .await
+        .into_diagnostic()?;
+    Ok(tls_stream)
+}
+
 /// Build a rustls `ClientConfig` with Mozilla root CAs for upstream connections.
 pub fn build_upstream_client_config() -> Arc<ClientConfig> {
     let mut root_store = rustls::RootCertStore::empty();

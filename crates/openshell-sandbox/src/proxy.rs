@@ -842,6 +842,217 @@ async fn handle_tcp_connection(
     Ok(())
 }
 
+// ── Comm Channel tunnel handler ───────────────────────────────────────────
+//
+// Called from `run_dpu_proxy_cc` in lib.rs for each tunnel accepted by
+// `ComchListener::accept()`.  OPA was already evaluated when the OPEN message
+// was processed; here we just do upstream connect + TLS termination + relay.
+
+/// Handle a single OCPP tunnel accepted from the host shim.
+///
+/// `stream` is a `TunnelStream` (AsyncRead + AsyncWrite) carrying the raw
+/// TCP payload that would normally arrive on a TCP connection after a successful
+/// HTTP CONNECT.  OPA was already evaluated in the OPEN message handler.
+///
+/// The function mirrors the post-CONNECT path inside `handle_tcp_connection`,
+/// minus the HTTP parsing / OPA re-evaluation (already done) and minus the
+/// `inference.local` interception path (which requires `TcpStream` for now;
+/// add a generic variant if needed).
+pub async fn handle_comch_tunnel(
+    stream: crate::comch_transport::TunnelStream,
+    host: String,
+    port: u16,
+    opa_engine: Arc<OpaEngine>,
+    _identity_cache: Arc<BinaryIdentityCache>,
+    _entrypoint_pid: Arc<AtomicU32>,
+    tls_state: Option<Arc<crate::l7::tls::ProxyTlsState>>,
+    _inference_ctx: Option<Arc<InferenceContext>>,
+    secret_resolver: Option<Arc<crate::secrets::SecretResolver>>,
+) -> Result<()> {
+    use crate::l7::relay::L7EvalContext;
+    use crate::l7::rest::looks_like_http;
+    use crate::l7::tls::{looks_like_tls, tls_connect_upstream_generic, tls_terminate_generic};
+    use tokio::io::AsyncReadExt;
+
+    let host_lc = host.to_ascii_lowercase();
+
+    // Resolve upstream TCP connection (same SSRF defenses as TCP path).
+    let upstream = match resolve_and_reject_internal(&host_lc, port).await {
+        Ok(addrs) => tokio::net::TcpStream::connect(addrs.as_slice())
+            .await
+            .into_diagnostic()?,
+        Err(reason) => {
+            warn!(
+                dst_host = %host_lc,
+                dst_port = port,
+                reason = %reason,
+                "Comm Channel tunnel blocked: internal address"
+            );
+            return Ok(());
+        }
+    };
+
+    info!(
+        dst_host = %host_lc,
+        dst_port = port,
+        transport = "comch",
+        action = "allow",
+        "CONNECT"
+    );
+
+    // Build L7 eval context for credential injection / inspection.
+    let ctx = L7EvalContext {
+        host: host_lc.clone(),
+        port,
+        policy_name: String::new(),
+        binary_path: String::new(),
+        ancestors: vec![],
+        cmdline_paths: vec![],
+        secret_resolver: secret_resolver.clone(),
+    };
+
+    // Query L7 config from OPA (destination-only, no process identity).
+    let decision = ConnectDecision {
+        action: NetworkAction::Allow {
+            matched_policy: None,
+        },
+        binary: None,
+        binary_pid: None,
+        ancestors: vec![],
+        cmdline_paths: vec![],
+    };
+    let l7_config = query_l7_config(&opa_engine, &decision, &host_lc, port);
+
+    // TunnelStream has no peek(), so read bytes then chain them back.
+    // Split read/write halves before chaining — Chain is AsyncRead-only,
+    // and we need AsyncWrite too. Re-join after prefixing the read half.
+    let (read_half, write_half) = tokio::io::split(stream);
+    let mut read_half = read_half;
+    let mut peek_buf = [0u8; 8];
+    let n = read_half.read(&mut peek_buf).await.into_diagnostic()?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let is_tls = looks_like_tls(&peek_buf[..n]);
+    let is_http = looks_like_http(&peek_buf[..n]);
+
+    // Reassemble into a single owned stream that implements AsyncRead + AsyncWrite.
+    // Owned (not borrowed) so the 'static bound on tls_terminate_generic is met.
+    let prefixed_read = tokio::io::AsyncReadExt::chain(
+        std::io::Cursor::new(peek_buf[..n].to_vec()),
+        read_half,
+    );
+    let stream = tokio::io::join(prefixed_read, write_half);
+
+    if is_tls {
+        if let Some(tls) = tls_state {
+            // Move `stream` by value — Join<...>: 'static satisfies tls_terminate_generic bound.
+            match tls_terminate_generic(stream, tls.as_ref(), &host_lc).await {
+                Ok(mut tls_client) => {
+                    match tls_connect_upstream_generic(
+                        upstream,
+                        &host_lc,
+                        tls.upstream_config(),
+                    )
+                    .await
+                    {
+                        Ok(mut tls_upstream) => {
+                            let r = if let Some(ref l7_cfg) = l7_config {
+                                let tunnel_engine =
+                                    opa_engine.clone_engine_for_tunnel().unwrap_or_else(|e| {
+                                        warn!(error = %e, "Comm Channel: failed to clone OPA engine for L7");
+                                        regorus::Engine::new()
+                                    });
+                                crate::l7::relay::relay_with_inspection(
+                                    l7_cfg,
+                                    std::sync::Mutex::new(tunnel_engine),
+                                    &mut tls_client,
+                                    &mut tls_upstream,
+                                    &ctx,
+                                )
+                                .await
+                            } else {
+                                crate::l7::relay::relay_passthrough_with_credentials(
+                                    &mut tls_client,
+                                    &mut tls_upstream,
+                                    &ctx,
+                                )
+                                .await
+                            };
+                            if let Err(e) = r {
+                                if is_benign_relay_error(&e) {
+                                    debug!(host = %host_lc, port, error = %e, "Comm Channel TLS connection closed");
+                                } else {
+                                    warn!(host = %host_lc, port, error = %e, "Comm Channel TLS relay error");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(host = %host_lc, port, error = %e, "Comm Channel: TLS upstream connect failed");
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(host = %host_lc, port, error = %e, "Comm Channel: TLS termination failed");
+                }
+            }
+        } else {
+            warn!(
+                host = %host_lc,
+                port,
+                "Comm Channel: TLS detected but TLS state not configured, raw tunnel"
+            );
+            let mut stream = stream;
+            let mut upstream = upstream;
+            let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+        }
+    } else if is_http {
+        let mut stream = stream;
+        let mut upstream = upstream;
+        if let Some(ref l7_cfg) = l7_config {
+            let tunnel_engine = opa_engine.clone_engine_for_tunnel().unwrap_or_else(|e| {
+                warn!(error = %e, "Comm Channel: failed to clone OPA engine for L7");
+                regorus::Engine::new()
+            });
+            if let Err(e) = crate::l7::relay::relay_with_inspection(
+                l7_cfg,
+                std::sync::Mutex::new(tunnel_engine),
+                &mut stream,
+                &mut upstream,
+                &ctx,
+            )
+            .await
+            {
+                if is_benign_relay_error(&e) {
+                    debug!(host = %host_lc, port, error = %e, "Comm Channel HTTP relay closed");
+                } else {
+                    warn!(host = %host_lc, port, error = %e, "Comm Channel HTTP relay error");
+                }
+            }
+        } else if let Err(e) = crate::l7::relay::relay_passthrough_with_credentials(
+            &mut stream,
+            &mut upstream,
+            &ctx,
+        )
+        .await
+        {
+            if is_benign_relay_error(&e) {
+                debug!(host = %host_lc, port, error = %e, "Comm Channel HTTP relay closed");
+            } else {
+                warn!(host = %host_lc, port, error = %e, "Comm Channel HTTP relay error");
+            }
+        }
+    } else {
+        // Raw binary relay (neither TLS nor HTTP).
+        let mut stream = stream;
+        let mut upstream = upstream;
+        let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+    }
+
+    Ok(())
+}
+
 /// Evaluate OPA policy for a TCP connection with identity binding via /proc/net/tcp.
 #[cfg(target_os = "linux")]
 fn evaluate_opa_tcp(

@@ -7,6 +7,7 @@
 
 pub mod bypass_monitor;
 mod child_env;
+pub mod comch_transport;
 pub mod denial_aggregator;
 mod grpc_client;
 mod identity;
@@ -1024,6 +1025,154 @@ pub async fn run_dpu_proxy(
         .into_diagnostic()
         .map_err(|e| miette::miette!("Signal error: {e}"))?;
     info!("DPU proxy shutting down");
+    Ok(())
+}
+
+/// Start the DPU proxy using DOCA Comm Channel (PCIe) as the transport layer.
+///
+/// Identical to `run_dpu_proxy` in all logic (OPA, TLS MITM, credential injection,
+/// inference routing) — only the transport layer changes.  Instead of accepting TCP
+/// connections on a port, this function starts a DOCA Comm Channel server that the
+/// host shim connects to over PCIe.
+///
+/// # Arguments
+/// - `pci_addr` — PCI address of the BlueField PF as seen from the DPU ARM (e.g. `"03:00.0"`)
+/// - `service_name` — DOCA Comm Channel service name (default `"openshell-proxy"`)
+/// - `opa_url` — OPA REST daemon URL on the DPU ARM
+/// - `credentials_path` — path to credentials JSON file (optional)
+/// - `inference_routes` — path to inference routes YAML file (optional)
+///
+/// Usage:
+/// ```text
+/// openshell-dpu-proxy --mode comch --pci 03:00.0 \
+///     --opa-url http://127.0.0.1:8181 \
+///     --credentials ~/openshell-dpu/credentials.json \
+///     --inference-routes ~/openshell-dpu/routes.yaml
+/// ```
+pub async fn run_dpu_proxy_cc(
+    pci_addr: String,
+    service_name: String,
+    opa_url: String,
+    credentials_path: Option<String>,
+    inference_routes: Option<String>,
+) -> Result<()> {
+    use crate::comch_transport::ComchListener;
+
+    let opa_engine = Arc::new(OpaEngine::rest_only(opa_url.clone()));
+    info!(opa_url = %opa_url, "DPU proxy (comch): using OPA REST daemon");
+
+    let identity_cache = Arc::new(crate::identity::BinaryIdentityCache::new());
+    let entrypoint_pid = Arc::new(AtomicU32::new(u32::MAX));
+
+    // Credentials
+    let provider_env: std::collections::HashMap<String, String> =
+        if let Some(ref path) = credentials_path {
+            match std::fs::read_to_string(path) {
+                Ok(json) => match serde_json::from_str(&json) {
+                    Ok(creds) => {
+                        info!(path = %path, "DPU proxy (comch): loaded credentials from file");
+                        for (k, v) in &creds {
+                            #[allow(unused_unsafe)]
+                            unsafe { std::env::set_var(k, v) };
+                        }
+                        creds
+                    }
+                    Err(e) => {
+                        warn!(error = %e, path = %path, "DPU proxy (comch): failed to parse credentials");
+                        std::collections::HashMap::new()
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, path = %path, "DPU proxy (comch): failed to read credentials");
+                    std::collections::HashMap::new()
+                }
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+    let (_, secret_resolver) = SecretResolver::from_provider_env(provider_env);
+    let secret_resolver = secret_resolver.map(Arc::new);
+
+    // TLS ephemeral CA
+    let tls_state = match crate::l7::tls::SandboxCa::generate() {
+        Ok(ca) => {
+            let cert_path = "/tmp/openshell-dpu-ca.crt";
+            if let Err(e) = std::fs::write(cert_path, ca.cert_pem()) {
+                warn!(error = %e, path = %cert_path, "DPU proxy (comch): failed to write CA cert");
+            } else {
+                info!(
+                    path = %cert_path,
+                    "DPU proxy (comch): CA cert written — install on host with:\n  \
+                     sudo cp {cert_path} /usr/local/share/ca-certificates/openshell-dpu-ca.crt\n  \
+                     sudo update-ca-certificates"
+                );
+            }
+            let upstream_config = crate::l7::tls::build_upstream_client_config();
+            let cert_cache = crate::l7::tls::CertCache::new(ca);
+            Some(Arc::new(crate::l7::tls::ProxyTlsState::new(
+                cert_cache,
+                upstream_config,
+            )))
+        }
+        Err(e) => {
+            warn!(error = %e, "DPU proxy (comch): failed to generate CA, TLS termination disabled");
+            None
+        }
+    };
+
+    // Inference routing
+    let inference_ctx =
+        build_inference_context(None, None, inference_routes.as_deref()).await?;
+
+    // Start the Comm Channel listener
+    let mut listener =
+        ComchListener::start(&pci_addr, &service_name, opa_engine.clone())
+            .map_err(|e| miette::miette!("Comm Channel server start failed: {e}"))?;
+
+    info!(
+        pci = %pci_addr,
+        service = %service_name,
+        "DPU proxy (comch): listening for host connections via PCIe Comm Channel"
+    );
+
+    // Accept loop — mirrors what ProxyHandle::start_with_bind_addr does for TCP.
+    let tls = tls_state;
+    let inf = inference_ctx;
+    let resolver = secret_resolver;
+    let opa = opa_engine;
+    let cache = identity_cache;
+    let pid = entrypoint_pid;
+
+    let accept_loop = async move {
+        loop {
+            let Some((stream, host, port)) = listener.accept().await else {
+                info!("DPU proxy (comch): Comm Channel listener closed");
+                break;
+            };
+            let tls2 = tls.clone();
+            let inf2 = inf.clone();
+            let res2 = resolver.clone();
+            let opa2 = opa.clone();
+            let cache2 = cache.clone();
+            let pid2 = pid.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::proxy::handle_comch_tunnel(
+                    stream, host, port, opa2, cache2, pid2, tls2, inf2, res2,
+                )
+                .await
+                {
+                    warn!(error = %e, "DPU proxy (comch): tunnel error");
+                }
+            });
+        }
+    };
+
+    tokio::select! {
+        _ = accept_loop => {}
+        _ = tokio::signal::ctrl_c() => {
+            info!("DPU proxy (comch) shutting down");
+        }
+    }
     Ok(())
 }
 

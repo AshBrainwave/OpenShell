@@ -7,33 +7,75 @@
 //! terminates TLS, evaluates policy via the OPA REST daemon at 127.0.0.1:8181,
 //! injects credentials from a local vault file, and forwards traffic.
 //!
-//! Usage:
+//! Usage (TCP mode — rshim, dev/testing only):
 //!   openshell-dpu-proxy \
 //!     --listen 0.0.0.0:8080 \
 //!     --opa-url http://127.0.0.1:8181 \
 //!     --credentials /home/ubuntu/openshell-dpu/credentials.json \
 //!     --inference-routes /home/ubuntu/openshell-dpu/routes.yaml
+//!
+//! Usage (Comm Channel mode — untrusted-host, production):
+//!   openshell-dpu-proxy --mode comch \
+//!     --pci 03:00.0 \
+//!     --opa-url http://127.0.0.1:8181 \
+//!     --credentials /home/ubuntu/openshell-dpu/credentials.json
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use miette::Result;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-use openshell_sandbox::run_dpu_proxy;
+use openshell_sandbox::{run_dpu_proxy, run_dpu_proxy_cc};
+
+#[derive(Debug, Clone, ValueEnum)]
+enum Mode {
+    /// TCP over rshim/tmfifo — for dev/testing only, not for untrusted-host use.
+    Tcp,
+    /// DOCA Comm Channel over PCIe — hardware-enforced, works in untrusted-host mode.
+    Comch,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "openshell-dpu-proxy")]
 #[command(version = openshell_core::VERSION)]
 #[command(about = "OpenShell TLS proxy for BlueField DPU ARM")]
 struct Args {
-    /// TCP address to listen on.
-    /// Host agents set HTTPS_PROXY=http://<dpu-ip>:<port> to reach this.
+    /// Transport mode: tcp (rshim, dev) or comch (PCIe Comm Channel, production).
+    #[arg(long, value_enum, default_value = "tcp", env = "OPENSHELL_MODE")]
+    mode: Mode,
+
+    // ---- TCP mode args ----
+
+    /// [tcp] TCP address to listen on.
     #[arg(long, default_value = "0.0.0.0:8080", env = "OPENSHELL_LISTEN")]
     listen: String,
 
+    /// Path to write the ephemeral CA certificate (tcp mode).
+    #[arg(
+        long,
+        default_value = "/tmp/openshell-dpu-ca.crt",
+        env = "OPENSHELL_DPU_CA_CERT_OUT"
+    )]
+    ca_cert_out: String,
+
+    // ---- Comm Channel mode args ----
+
+    /// [comch] PCI address of the BlueField device (e.g. 03:00.0).
+    #[arg(long, default_value = "03:00.0", env = "OPENSHELL_PCI_ADDR")]
+    pci: String,
+
+    /// [comch] DOCA Comm Channel service name (must match host shim).
+    #[arg(
+        long,
+        default_value = "openshell-proxy",
+        env = "OPENSHELL_CC_SERVICE"
+    )]
+    service: String,
+
+    // ---- Shared args ----
+
     /// OPA REST daemon URL on the DPU ARM.
-    /// The daemon evaluates per-connection policy from openshell.rego.
     #[arg(
         long,
         default_value = "http://127.0.0.1:8181",
@@ -41,24 +83,13 @@ struct Args {
     )]
     opa_url: String,
 
-    /// Path to credentials JSON file: `{"ANTHROPIC_API_KEY": "sk-..."}`.
-    /// Keys are injected into agent requests at the proxy layer — agents never
-    /// see the real values.
+    /// Path to credentials JSON file: `{"NVIDIA_API_KEY": "nvapi-..."}`.
     #[arg(long, env = "OPENSHELL_DPU_CREDENTIALS")]
     credentials: Option<String>,
 
-    /// Path to inference routes YAML file for inference.local routing.
+    /// Path to inference routes YAML file for inference.local routing (tcp mode only).
     #[arg(long, env = "OPENSHELL_INFERENCE_ROUTES")]
     inference_routes: Option<String>,
-
-    /// Path to write the ephemeral CA certificate.
-    /// Install this cert in the host agent's trust store so it trusts the DPU's TLS.
-    #[arg(
-        long,
-        default_value = "/tmp/openshell-dpu-ca.crt",
-        env = "OPENSHELL_DPU_CA_CERT_OUT"
-    )]
-    ca_cert_out: String,
 
     /// Log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "info", env = "OPENSHELL_LOG_LEVEL")]
@@ -82,20 +113,37 @@ async fn main() -> Result<()> {
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    info!(
-        listen = %args.listen,
-        opa_url = %args.opa_url,
-        credentials = ?args.credentials,
-        inference_routes = ?args.inference_routes,
-        "Starting OpenShell DPU proxy"
-    );
-
-    run_dpu_proxy(
-        args.listen,
-        args.opa_url,
-        args.credentials,
-        args.inference_routes,
-        Some(args.ca_cert_out),
-    )
-    .await
+    match args.mode {
+        Mode::Tcp => {
+            info!(
+                listen = %args.listen,
+                opa_url = %args.opa_url,
+                "Starting OpenShell DPU proxy (tcp/rshim mode)"
+            );
+            run_dpu_proxy(
+                args.listen,
+                args.opa_url,
+                args.credentials,
+                args.inference_routes,
+                Some(args.ca_cert_out),
+            )
+            .await
+        }
+        Mode::Comch => {
+            info!(
+                pci = %args.pci,
+                service = %args.service,
+                opa_url = %args.opa_url,
+                "Starting OpenShell DPU proxy (comch/PCIe mode)"
+            );
+            run_dpu_proxy_cc(
+                args.pci,
+                args.service,
+                args.opa_url,
+                args.credentials,
+                args.inference_routes,
+            )
+            .await
+        }
+    }
 }
