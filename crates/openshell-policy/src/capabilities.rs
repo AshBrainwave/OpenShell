@@ -262,7 +262,7 @@ fn capability_rule_to_proto(policy_name: &str, rule: CapabilityRuleDef) -> Netwo
 }
 
 pub fn parse_capability_definition(yaml: &str) -> Result<CapabilityDefinition> {
-    let raw: CapabilityFile = serde_yaml::from_str(yaml)
+    let raw: CapabilityFile = serde_yml::from_str(yaml)
         .into_diagnostic()
         .wrap_err("failed to parse capability YAML")?;
     Ok(CapabilityDefinition {
