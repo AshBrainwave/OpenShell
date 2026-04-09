@@ -876,8 +876,11 @@ pub async fn handle_comch_tunnel(
 
     let host_lc = host.to_ascii_lowercase();
 
-    // Resolve upstream TCP connection (same SSRF defenses as TCP path).
-    let upstream = match resolve_and_reject_internal(&host_lc, port).await {
+    // Resolve upstream TCP connection.
+    // The comch path only blocks loopback and link-local (genuine SSRF vectors).
+    // RFC1918 addresses are allowed — destinations are OPA-approved and the DPU
+    // may route to hosts on private networks (e.g. NVIDIA internal endpoints).
+    let upstream = match resolve_and_reject_dangerous(&host_lc, port).await {
         Ok(addrs) => tokio::net::TcpStream::connect(addrs.as_slice())
             .await
             .into_diagnostic()?,
@@ -886,7 +889,7 @@ pub async fn handle_comch_tunnel(
                 dst_host = %host_lc,
                 dst_port = port,
                 reason = %reason,
-                "Comm Channel tunnel blocked: internal address"
+                "Comm Channel tunnel blocked"
             );
             return Ok(());
         }
@@ -1758,6 +1761,36 @@ async fn resolve_and_reject_internal(
         if is_internal_ip(addr.ip()) {
             return Err(format!(
                 "{host} resolves to internal address {}, connection rejected",
+                addr.ip()
+            ));
+        }
+    }
+
+    Ok(addrs)
+}
+
+/// Resolve DNS and reject only genuinely dangerous addresses (loopback, link-local,
+/// unspecified). RFC1918 addresses are allowed — used by the comch/DPU path where
+/// all destinations are already OPA-approved and endpoints may be on private networks.
+async fn resolve_and_reject_dangerous(
+    host: &str,
+    port: u16,
+) -> std::result::Result<Vec<SocketAddr>, String> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("DNS resolution failed for {host}:{port}: {e}"))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(format!(
+            "DNS resolution returned no addresses for {host}:{port}"
+        ));
+    }
+
+    for addr in &addrs {
+        if is_always_blocked_ip(addr.ip()) {
+            return Err(format!(
+                "{host} resolves to blocked address {}, connection rejected",
                 addr.ip()
             ));
         }
