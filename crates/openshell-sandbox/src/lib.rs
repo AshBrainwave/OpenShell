@@ -1199,27 +1199,6 @@ fn fetch_routes_from_opa(
 ) -> Option<Vec<openshell_router::config::ResolvedRoute>> {
     use openshell_router::config::{DEFAULT_ROUTE_TIMEOUT, ResolvedRoute};
 
-    #[derive(serde::Deserialize)]
-    struct OpaRouteData {
-        #[serde(default)]
-        name: Option<String>,
-        endpoint: String,
-        model: String,
-        #[serde(default)]
-        api_key_env: Option<String>,
-        #[serde(default)]
-        api_key: Option<String>,
-        #[serde(default)]
-        protocols: Vec<String>,
-        #[serde(default)]
-        provider_type: Option<String>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct OpaResponse {
-        result: Option<OpaRouteData>,
-    }
-
     let url = format!(
         "{}/v1/data/inference_routes",
         opa_url.trim_end_matches('/')
@@ -1233,7 +1212,9 @@ fn fetch_routes_from_opa(
         }
     };
 
-    let body: OpaResponse = match resp.into_json() {
+    // Parse as serde_json::Value — avoids needing serde as a direct dep.
+    // OPA wraps all data responses in {"result": <value>}.
+    let body: serde_json::Value = match resp.into_json() {
         Ok(b) => b,
         Err(e) => {
             warn!(error = %e, "comch: failed to parse OPA inference_routes response");
@@ -1241,12 +1222,23 @@ fn fetch_routes_from_opa(
         }
     };
 
-    let data = body.result?; // None = OPA has no inference_routes data yet
+    // result = null means OPA has the path but no data yet.
+    let data = match body.get("result") {
+        Some(v) if !v.is_null() => v,
+        _ => return None,
+    };
 
-    let api_key = if let Some(key) = data.api_key {
+    let str_field = |key: &str| -> Option<String> {
+        data.get(key)?.as_str().map(str::to_owned)
+    };
+
+    let endpoint = str_field("endpoint")?;
+    let model = str_field("model")?;
+
+    let api_key = if let Some(key) = str_field("api_key") {
         key
-    } else if let Some(ref env_var) = data.api_key_env {
-        match std::env::var(env_var) {
+    } else if let Some(env_var) = str_field("api_key_env") {
+        match std::env::var(&env_var) {
             Ok(k) => k,
             Err(_) => {
                 warn!(env_var = %env_var, "comch: OPA inference_routes api_key_env not set");
@@ -1258,20 +1250,30 @@ fn fetch_routes_from_opa(
         return None;
     };
 
-    let protocols = if data.protocols.is_empty() {
+    let raw_protocols: Vec<String> = data
+        .get("protocols")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let protocols = if raw_protocols.is_empty() {
         vec!["openai_chat_completions".to_string()]
     } else {
-        openshell_core::inference::normalize_protocols(&data.protocols)
+        openshell_core::inference::normalize_protocols(&raw_protocols)
     };
 
-    let (auth, default_headers) = openshell_core::inference::auth_for_provider_type(
-        data.provider_type.as_deref().unwrap_or(""),
-    );
+    let provider_type = str_field("provider_type").unwrap_or_default();
+    let (auth, default_headers) =
+        openshell_core::inference::auth_for_provider_type(&provider_type);
 
     Some(vec![ResolvedRoute {
-        name: data.name.unwrap_or_else(|| "inference.local".to_string()),
-        endpoint: data.endpoint,
-        model: data.model,
+        name: str_field("name").unwrap_or_else(|| "inference.local".to_string()),
+        endpoint,
+        model,
         api_key,
         protocols,
         auth,
