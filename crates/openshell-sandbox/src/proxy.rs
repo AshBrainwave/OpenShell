@@ -866,7 +866,7 @@ pub async fn handle_comch_tunnel(
     _identity_cache: Arc<BinaryIdentityCache>,
     _entrypoint_pid: Arc<AtomicU32>,
     tls_state: Option<Arc<crate::l7::tls::ProxyTlsState>>,
-    _inference_ctx: Option<Arc<InferenceContext>>,
+    inference_ctx: Option<Arc<InferenceContext>>,
     secret_resolver: Option<Arc<crate::secrets::SecretResolver>>,
 ) -> Result<()> {
     use crate::l7::relay::L7EvalContext;
@@ -961,6 +961,9 @@ pub async fn handle_comch_tunnel(
                     .await
                     {
                         Ok(mut tls_upstream) => {
+                            // Look up inference route for this host to get auth header.
+                            let route_auth = resolve_inference_auth(&inference_ctx, &host_lc).await;
+
                             let r = if let Some(ref l7_cfg) = l7_config {
                                 let tunnel_engine =
                                     opa_engine.clone_engine_for_tunnel().unwrap_or_else(|e| {
@@ -973,6 +976,15 @@ pub async fn handle_comch_tunnel(
                                     &mut tls_client,
                                     &mut tls_upstream,
                                     &ctx,
+                                )
+                                .await
+                            } else if let Some((auth_name, auth_value)) = route_auth {
+                                relay_with_injected_auth(
+                                    &mut tls_client,
+                                    &mut tls_upstream,
+                                    &ctx,
+                                    &auth_name,
+                                    &auth_value,
                                 )
                                 .await
                             } else {
@@ -3569,4 +3581,131 @@ mod tests {
         let result = implicit_allowed_ips_for_ip_host("*.example.com");
         assert!(result.is_empty());
     }
+}
+
+/// Look up the auth header (name, value) for `host` from the inference route cache.
+///
+/// Matches by extracting the hostname from the route's `endpoint` URL.
+/// Returns `None` if no route matches or the route has no API key.
+async fn resolve_inference_auth(
+    inference_ctx: &Option<Arc<InferenceContext>>,
+    host: &str,
+) -> Option<(String, String)> {
+    use openshell_core::inference::AuthHeader;
+
+    let ctx = inference_ctx.as_ref()?;
+    let cache = ctx.route_cache();
+    let routes = cache.read().await;
+
+    for route in routes.iter() {
+        // Extract hostname from endpoint URL (e.g. "https://inference-api.nvidia.com/v1" → "inference-api.nvidia.com")
+        let endpoint_host = route
+            .endpoint
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .split(':')  // strip port if present
+            .next()
+            .unwrap_or("");
+
+        if endpoint_host.eq_ignore_ascii_case(host) {
+            let (name, value) = match &route.auth {
+                AuthHeader::Bearer => {
+                    ("Authorization".to_string(), format!("Bearer {}", route.api_key))
+                }
+                AuthHeader::Custom(header_name) => {
+                    (header_name.to_string(), route.api_key.clone())
+                }
+            };
+            info!(host = %host, header = %name, "comch: injecting auth from inference route");
+            return Some((name, value));
+        }
+    }
+    None
+}
+
+/// Relay a TLS session, injecting `auth_name: auth_value` on every HTTP request
+/// that does not already carry that header. Used in the comch path to auto-inject
+/// API keys for OPA-approved inference endpoints without requiring placeholders.
+async fn relay_with_injected_auth<C, U>(
+    client: &mut C,
+    upstream: &mut U,
+    ctx: &crate::l7::relay::L7EvalContext,
+    auth_name: &str,
+    auth_value: &str,
+) -> Result<()>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+    U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+    use crate::l7::rest::RestProvider;
+    use crate::l7::provider::{L7Provider, RelayOutcome};
+
+    let provider = RestProvider;
+    let auth_header_lc = auth_name.to_ascii_lowercase();
+    let inject_line = format!("{auth_name}: {auth_value}\r\n");
+
+    loop {
+        let mut req = match provider.parse_request(client).await {
+            Ok(Some(r)) => r,
+            Ok(None) => break,
+            Err(e) => {
+                if crate::proxy::is_benign_relay_error(&e) {
+                    break;
+                }
+                return Err(e);
+            }
+        };
+
+        // Find header block end (\r\n\r\n).
+        let header_end = req
+            .raw_header
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map_or(req.raw_header.len(), |p| p + 4);
+
+        // Check if auth header already present (case-insensitive).
+        let already_present = req.raw_header[..header_end]
+            .windows(auth_header_lc.len())
+            .any(|w: &[u8]| w.eq_ignore_ascii_case(auth_header_lc.as_bytes()));
+
+        if !already_present {
+            // Inject auth header before the final \r\n (blank line terminator).
+            // header_end points past \r\n\r\n; insert_pos is just before the last \r\n.
+            let insert_pos = header_end.saturating_sub(2);
+            let inject_bytes = inject_line.as_bytes();
+            let mut new_header = Vec::with_capacity(req.raw_header.len() + inject_bytes.len());
+            new_header.extend_from_slice(&req.raw_header[..insert_pos]);
+            new_header.extend_from_slice(inject_bytes);
+            new_header.extend_from_slice(&req.raw_header[insert_pos..]);
+            req.raw_header = new_header;
+        }
+
+        // relay_http_request_with_resolver writes the (now-modified) headers once,
+        // then relays body + response back to client.
+        let outcome = crate::l7::rest::relay_http_request_with_resolver(
+            &req,
+            client,
+            upstream,
+            ctx.secret_resolver.as_deref(),
+        )
+        .await?;
+
+        // Log.
+        info!(
+            host = %ctx.host,
+            port = ctx.port,
+            method = %req.action,
+            credentials_injected = !already_present,
+            "HTTP_REQUEST comch"
+        );
+
+        match outcome {
+            RelayOutcome::Reusable => {}
+            RelayOutcome::Consumed | RelayOutcome::Upgraded { .. } => break,
+        }
+    }
+    Ok(())
 }
