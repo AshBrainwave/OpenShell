@@ -1121,9 +1121,11 @@ pub async fn run_dpu_proxy_cc(
         }
     };
 
-    // Inference routing
+    // Inference routing — OPA-driven (runtime-updatable) with optional YAML seed.
+    // Priority: YAML file (--inference-routes) seeds on first start; OPA data
+    // takes over and is polled every 30 s thereafter. Either alone also works.
     let inference_ctx =
-        build_inference_context(None, None, inference_routes.as_deref()).await?;
+        build_comch_inference_context(&opa_url, inference_routes.as_deref()).await?;
 
     // Start the Comm Channel listener
     let mut listener =
@@ -1175,6 +1177,192 @@ pub async fn run_dpu_proxy_cc(
         }
     }
     Ok(())
+}
+
+/// Fetch inference routes from OPA `data.inference_routes` at runtime.
+///
+/// OPA stores a single route object (not an array). Returns `None` when OPA has
+/// no `inference_routes` data yet, or when the API key env var is not set.
+///
+/// Expected OPA data shape (`PUT /v1/data/inference_routes`):
+/// ```json
+/// {
+///   "endpoint":      "https://inference-api.nvidia.com/v1",
+///   "model":         "us/aws/anthropic/bedrock-claude-opus-4-6",
+///   "api_key_env":   "NVIDIA_API_KEY",
+///   "protocols":     ["openai_chat_completions"],
+///   "provider_type": "nvidia"
+/// }
+/// ```
+fn fetch_routes_from_opa(
+    opa_url: &str,
+) -> Option<Vec<openshell_router::config::ResolvedRoute>> {
+    use openshell_router::config::{DEFAULT_ROUTE_TIMEOUT, ResolvedRoute};
+
+    #[derive(serde::Deserialize)]
+    struct OpaRouteData {
+        #[serde(default)]
+        name: Option<String>,
+        endpoint: String,
+        model: String,
+        #[serde(default)]
+        api_key_env: Option<String>,
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        protocols: Vec<String>,
+        #[serde(default)]
+        provider_type: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OpaResponse {
+        result: Option<OpaRouteData>,
+    }
+
+    let url = format!(
+        "{}/v1/data/inference_routes",
+        opa_url.trim_end_matches('/')
+    );
+
+    let resp = match ureq::get(&url).call() {
+        Ok(r) => r,
+        Err(e) => {
+            debug!(error = %e, "comch: OPA inference_routes fetch failed");
+            return None;
+        }
+    };
+
+    let body: OpaResponse = match resp.into_json() {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "comch: failed to parse OPA inference_routes response");
+            return None;
+        }
+    };
+
+    let data = body.result?; // None = OPA has no inference_routes data yet
+
+    let api_key = if let Some(key) = data.api_key {
+        key
+    } else if let Some(ref env_var) = data.api_key_env {
+        match std::env::var(env_var) {
+            Ok(k) => k,
+            Err(_) => {
+                warn!(env_var = %env_var, "comch: OPA inference_routes api_key_env not set");
+                return None;
+            }
+        }
+    } else {
+        warn!("comch: OPA inference_routes has neither api_key nor api_key_env");
+        return None;
+    };
+
+    let protocols = if data.protocols.is_empty() {
+        vec!["openai_chat_completions".to_string()]
+    } else {
+        openshell_core::inference::normalize_protocols(&data.protocols)
+    };
+
+    let (auth, default_headers) = openshell_core::inference::auth_for_provider_type(
+        data.provider_type.as_deref().unwrap_or(""),
+    );
+
+    Some(vec![ResolvedRoute {
+        name: data.name.unwrap_or_else(|| "inference.local".to_string()),
+        endpoint: data.endpoint,
+        model: data.model,
+        api_key,
+        protocols,
+        auth,
+        default_headers,
+        timeout: DEFAULT_ROUTE_TIMEOUT,
+    }])
+}
+
+/// Build an [`InferenceContext`] for the Comm Channel (DPU) proxy.
+///
+/// Route config comes from two sources in priority order:
+/// 1. **OPA** (`data.inference_routes`) — queried at startup and refreshed every
+///    30 seconds. Update at runtime with `PUT /v1/data/inference_routes`.
+/// 2. **YAML file** (`--inference-routes`) — loaded once at startup as a seed.
+///    Used as the initial state when OPA has no routes data yet.
+///
+/// The two sources complement each other: the YAML file provides an instant
+/// first-boot configuration; OPA takes over once data is pushed and keeps
+/// routes hot-swappable without a proxy restart.
+async fn build_comch_inference_context(
+    opa_url: &str,
+    yaml_seed: Option<&str>,
+) -> Result<Option<Arc<proxy::InferenceContext>>> {
+    use openshell_router::Router;
+
+    // Seed from YAML file if provided, otherwise try OPA immediately.
+    let seed_routes: Vec<openshell_router::config::ResolvedRoute> = if let Some(path) = yaml_seed {
+        match openshell_router::config::RouterConfig::load_from_file(std::path::Path::new(path)) {
+            Ok(cfg) => match cfg.resolve_routes() {
+                Ok(r) => {
+                    info!(path = %path, route_count = r.len(),
+                          "DPU proxy (comch): loaded seed routes from YAML");
+                    r
+                }
+                Err(e) => {
+                    warn!(error = %e, path = %path,
+                          "DPU proxy (comch): failed to resolve YAML seed routes");
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                warn!(error = %e, path = %path,
+                      "DPU proxy (comch): failed to load YAML seed routes");
+                Vec::new()
+            }
+        }
+    } else {
+        // No YAML — try OPA immediately so first-boot has routes if OPA is pre-loaded.
+        fetch_routes_from_opa(opa_url).unwrap_or_default()
+    };
+
+    let router = Router::new()
+        .map_err(|e| miette::miette!("failed to initialize inference router: {e}"))?;
+    let patterns = l7::inference::default_patterns();
+    let (user_routes, system_routes) = partition_routes(seed_routes);
+
+    let ctx = Arc::new(proxy::InferenceContext::new(
+        patterns,
+        router,
+        user_routes,
+        system_routes,
+    ));
+
+    if ctx.route_cache().read().await.is_empty() {
+        info!("DPU proxy (comch): no inference routes at startup \
+               — push to OPA: PUT {opa_url}/v1/data/inference_routes");
+    }
+
+    // Background refresh: poll OPA every 30 s and hot-swap the route cache.
+    let route_cache = ctx.route_cache();
+    let opa_url_bg = opa_url.to_string();
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(route_refresh_interval_secs()));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Some(routes) = fetch_routes_from_opa(&opa_url_bg) {
+                let (user, _system) = partition_routes(routes);
+                let prev_len = route_cache.read().await.len();
+                let new_len = user.len();
+                *route_cache.write().await = user;
+                if new_len != prev_len {
+                    info!(route_count = new_len,
+                          "DPU proxy (comch): inference routes updated from OPA");
+                }
+            }
+        }
+    });
+
+    Ok(Some(ctx))
 }
 
 /// Route sources (in priority order):
