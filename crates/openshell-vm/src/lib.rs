@@ -108,6 +108,23 @@ pub enum NetBackend {
     },
 }
 
+/// Configuration for the protected-egress NIC (guest eth1).
+///
+/// The socket must be served by a bridge process (e.g. `vf-bridge`) that
+/// relays raw Ethernet frames between a UNIX stream socket and a host VF or
+/// TAP device. The VF must have its representor wired into an OVS bridge on
+/// the BlueField DPU so that all guest egress is DPU-policy-governed.
+#[derive(Debug, Clone)]
+pub struct ProtectedEgressConfig {
+    /// Path to the UNIX stream socket (QEMU wire protocol) served by the
+    /// host-side bridge process for the protected-egress NIC.
+    pub socket_path: PathBuf,
+
+    /// Guest-visible MAC address for eth1.
+    /// Must differ from the eth0 MAC. Choose a locally-administered address.
+    pub mac: [u8; 6],
+}
+
 /// Host Unix socket bridged into the guest as a vsock port.
 #[derive(Debug, Clone)]
 pub struct VsockPort {
@@ -184,6 +201,15 @@ pub struct VmConfig {
     /// Networking backend.
     pub net: NetBackend,
 
+    /// Optional protected-egress NIC (guest eth1).
+    ///
+    /// When set, a second virtio-net device is added to the VM using the UNIX
+    /// stream socket provided by the host-side VF bridge process. The guest
+    /// init script brings up eth1 with a static IP and no default route; all
+    /// protected-egress traffic must be explicitly routed via eth1 by the
+    /// guest workload.
+    pub protected_egress: Option<ProtectedEgressConfig>,
+
     /// Wipe all runtime state (containerd tasks/sandboxes, kubelet pods)
     /// before booting. Recovers from corrupted state after a crash.
     pub reset: bool,
@@ -236,6 +262,7 @@ impl VmConfig {
             reset: false,
             gateway_name: format!("{GATEWAY_NAME_PREFIX}-default"),
             state_disk: Some(state_disk),
+            protected_egress: None,
         }
     }
 }
@@ -1430,6 +1457,48 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
             );
             gvproxy_guard = Some(GvproxyGuard::new(child));
             gvproxy_api_sock = Some(api_sock);
+        }
+    }
+
+    // Protected-egress NIC (guest eth1) via VF bridge socket.
+    //
+    // The socket is served by a host-side bridge process (`vf-bridge`) that
+    // relays Ethernet frames between the UNIX stream socket and a host TAP
+    // or macvtap device wired to the BlueField VF. Guest traffic on eth1
+    // exits through the VF into the DPU eSwitch where OVS policy applies.
+    //
+    // Architecture (Linux only — VF passthrough is not available on macOS):
+    //   guest eth1  →  libkrun virtio-net  →  UNIX socket  →  vf-bridge
+    //   →  macvtap/TAP  →  host VF (enp179s0f0v0)
+    //   →  BF3 eSwitch  →  pf0vf0 representor  →  DPU OVS bridge
+    if let Some(pe) = &config.protected_egress {
+        #[cfg(target_os = "linux")]
+        {
+            const PE_NET_FEATURE_CSUM: u32 = 1 << 0;
+            const PE_NET_FEATURE_GUEST_CSUM: u32 = 1 << 1;
+            const PE_NET_FEATURE_GUEST_TSO4: u32 = 1 << 7;
+            const PE_NET_FEATURE_GUEST_UFO: u32 = 1 << 10;
+            const PE_NET_FEATURE_HOST_TSO4: u32 = 1 << 11;
+            const PE_NET_FEATURE_HOST_UFO: u32 = 1 << 14;
+            const PE_COMPAT_NET_FEATURES: u32 = PE_NET_FEATURE_CSUM
+                | PE_NET_FEATURE_GUEST_CSUM
+                | PE_NET_FEATURE_GUEST_TSO4
+                | PE_NET_FEATURE_GUEST_UFO
+                | PE_NET_FEATURE_HOST_TSO4
+                | PE_NET_FEATURE_HOST_UFO;
+            vm.add_net_unixstream(&pe.socket_path, &pe.mac, PE_COMPAT_NET_FEATURES)?;
+            eprintln!(
+                "Protected egress: virtio-net via {} [{:.1}s]",
+                pe.socket_path.display(),
+                launch_start.elapsed().as_secs_f64()
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(VmError::HostSetup(
+                "protected-egress NIC requires Linux (VF bridge not supported on this platform)"
+                    .to_string(),
+            ));
         }
     }
 

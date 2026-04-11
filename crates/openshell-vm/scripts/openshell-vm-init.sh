@@ -130,6 +130,20 @@ else
     NODE_IP="10.0.2.15"
 fi
 
+# ── Protected-egress NIC (eth1 / guest virtio-net via vf-bridge) ────────
+# eth1 is only present when openshell-vm is launched with --protected-egress-socket.
+# It connects the guest to a host VF bridge wired into the DPU OVS bridge.
+# We give it a static address in 10.99.2.0/24; NO default route is added —
+# traffic uses this interface only when explicitly routed through it.
+if ip link show eth1 >/dev/null 2>&1; then
+    ts "detected eth1 (protected-egress NIC)"
+    ip link set eth1 up 2>/dev/null || true
+    ip addr add 10.99.2.2/24 dev eth1 2>/dev/null || true
+    ts "eth1 up: 10.99.2.2/24 (no default route — protected egress only)"
+else
+    ts "no eth1 found (protected-egress NIC not attached)"
+fi
+
 # ── k3s data directories ───────────────────────────────────────────────
 
 mkdir -p /var/lib/rancher/k3s

@@ -87,6 +87,24 @@ struct Cli {
     #[arg(long, default_value = "gvproxy")]
     net: String,
 
+    /// UNIX stream socket path for the protected-egress NIC (guest eth1).
+    ///
+    /// When set, a second virtio-net device is added to the VM. The socket
+    /// must be served by a VF bridge process that relays frames to a host VF
+    /// wired into the DPU OVS bridge (e.g. enp179s0f0v0 → pf0vf0 → ovsbr1).
+    ///
+    /// Example:
+    ///   vf-bridge --tap /dev/tap0 --socket /run/vf-bridge/eth1.sock &
+    ///   openshell-vm --protected-egress-socket /run/vf-bridge/eth1.sock
+    #[arg(long, value_hint = ValueHint::FilePath)]
+    protected_egress_socket: Option<PathBuf>,
+
+    /// MAC address for the protected-egress NIC (guest eth1).
+    /// Must differ from the eth0 MAC. Format: XX:XX:XX:XX:XX:XX.
+    /// Default: 52:54:00:bf:00:01
+    #[arg(long, default_value = "52:54:00:bf:00:01")]
+    protected_egress_mac: String,
+
     /// Wipe all runtime state (containerd, kubelet, k3s) before booting.
     /// Use this to recover from a corrupted state after a crash or
     /// unclean shutdown.
@@ -223,6 +241,14 @@ fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         }
     };
 
+    let protected_egress = cli
+        .protected_egress_socket
+        .map(|socket_path| -> Result<_, Box<dyn std::error::Error>> {
+            let mac = parse_mac(&cli.protected_egress_mac)?;
+            Ok(openshell_vm::ProtectedEgressConfig { socket_path, mac })
+        })
+        .transpose()?;
+
     let rootfs = cli
         .rootfs
         .map_or_else(|| openshell_vm::ensure_named_rootfs(&cli.name), Ok)?;
@@ -246,6 +272,7 @@ fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             reset: cli.reset,
             gateway_name,
             state_disk: None,
+            protected_egress,
         }
     } else {
         let mut c = openshell_vm::VmConfig::gateway(rootfs);
@@ -261,6 +288,7 @@ fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         c.net = net_backend;
         c.reset = cli.reset;
         c.gateway_name = gateway_name;
+        c.protected_egress = protected_egress;
         if state_disk_disabled() {
             c.state_disk = None;
         }
@@ -276,4 +304,17 @@ fn state_disk_disabled() -> bool {
         std::env::var(DISABLE_STATE_DISK_ENV).ok().as_deref(),
         Some("1" | "true" | "TRUE" | "yes" | "YES")
     )
+}
+
+fn parse_mac(s: &str) -> Result<[u8; 6], Box<dyn std::error::Error>> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(format!("invalid MAC address '{s}': expected XX:XX:XX:XX:XX:XX").into());
+    }
+    let mut mac = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        mac[i] = u8::from_str_radix(part, 16)
+            .map_err(|_| format!("invalid MAC octet '{part}' in '{s}'"))?;
+    }
+    Ok(mac)
 }
