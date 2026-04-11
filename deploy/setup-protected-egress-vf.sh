@@ -118,5 +118,5 @@ log "  vf-bridge provides a UNIX stream socket for libkrun krun_add_net_unixstre
 log "  Connect openshell-vm with: --protected-egress-socket $SOCKET_PATH"
 
 exec "$VF_BRIDGE_BIN" \
-    --netdev "$VF_DEV" \
+    --ifname "$VF_DEV" \
     --socket "$SOCKET_PATH"

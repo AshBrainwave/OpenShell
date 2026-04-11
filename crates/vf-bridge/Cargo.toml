@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "vf-bridge"
+description = "L2 bridge: libkrun/QEMU UNIX stream socket ↔ Linux netdev (AF_PACKET)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "vf-bridge"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+libc = "0.2"
+
+[lints]
+workspace = true
