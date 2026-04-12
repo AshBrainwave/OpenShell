@@ -109,6 +109,10 @@ CONFIG_DUMMY=y
 # ── TUN/TAP (used by some CNI plugins) ────────────────────────────────
 CONFIG_TUN=y
 
+# ── POSIX message queues (required by runc container init) ─────────────
+CONFIG_POSIX_MQUEUE=y
+CONFIG_POSIX_MQUEUE_SYSCTL=y
+
 # ── Cgroups (already in base, ensure v2 is available) ──────────────────
 CONFIG_CGROUPS=y
 CONFIG_CGROUP_DEVICE=y
