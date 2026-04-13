@@ -133,13 +133,29 @@ fi
 # ── Protected-egress NIC (eth1 / guest virtio-net via vf-bridge) ────────
 # eth1 is only present when openshell-vm is launched with --protected-egress-socket.
 # It connects the guest to a host VF bridge wired into the DPU OVS bridge.
-# We give it a static address in 10.99.2.0/24; NO default route is added —
-# traffic uses this interface only when explicitly routed through it.
+# We give it a static address in 10.99.2.0/24 and set up policy routing so
+# sandbox pod traffic (10.42.0.0/24) exits via eth1 → DPU for enforcement.
 if ip link show eth1 >/dev/null 2>&1; then
     ts "detected eth1 (protected-egress NIC)"
     ip link set eth1 up 2>/dev/null || true
     ip addr add 10.99.2.2/24 dev eth1 2>/dev/null || true
-    ts "eth1 up: 10.99.2.2/24 (no default route — protected egress only)"
+
+    # ── Policy routing: steer sandbox pod egress through eth1 ──
+    # vf-bridge is a pure L2 relay (no ARP responder on the other end), so we
+    # add a static neighbor entry for a virtual gateway (10.99.2.1) using a
+    # well-known MAC. The frame goes through vf-bridge → host VF → DPU eSwitch
+    # → OVS flow table regardless of dest MAC.
+    # Use 02:00:00:00:00:01 (locally-administered unicast) to avoid collisions.
+    EGRESS_GW="10.99.2.1"
+    EGRESS_GW_MAC="02:00:00:00:00:01"
+    EGRESS_TABLE=100
+    POD_CIDR="10.42.0.0/24"
+
+    ip neigh replace "$EGRESS_GW" lladdr "$EGRESS_GW_MAC" dev eth1 nud permanent 2>/dev/null || true
+    ip route add default via "$EGRESS_GW" dev eth1 table "$EGRESS_TABLE" 2>/dev/null || true
+    ip rule add from "$POD_CIDR" lookup "$EGRESS_TABLE" priority 100 2>/dev/null || true
+
+    ts "eth1 up: 10.99.2.2/24, policy route: $POD_CIDR → table $EGRESS_TABLE via $EGRESS_GW dev eth1"
 else
     ts "no eth1 found (protected-egress NIC not attached)"
 fi
