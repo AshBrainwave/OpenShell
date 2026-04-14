@@ -1847,6 +1847,7 @@ pub async fn sandbox_create_with_bootstrap(
     remote: Option<&str>,
     ssh_key: Option<&str>,
     providers: &[String],
+    env: &[String],
     policy: Option<&str>,
     forward: Option<openshell_core::forward::ForwardSpec>,
     command: &[String],
@@ -1878,6 +1879,7 @@ pub async fn sandbox_create_with_bootstrap(
         remote,
         ssh_key,
         providers,
+        env,
         policy,
         forward,
         command,
@@ -1933,6 +1935,7 @@ pub async fn sandbox_create(
     remote: Option<&str>,
     ssh_key: Option<&str>,
     providers: &[String],
+    env: &[String],
     policy: Option<&str>,
     forward: Option<openshell_core::forward::ForwardSpec>,
     command: &[String],
@@ -2026,6 +2029,7 @@ pub async fn sandbox_create(
     .await?;
 
     let policy = load_sandbox_policy(policy)?;
+    let environment = parse_key_value_pairs(env, "--env")?;
 
     let template = image.map(|img| SandboxTemplate {
         image: img,
@@ -2037,6 +2041,7 @@ pub async fn sandbox_create(
             gpu: requested_gpu,
             policy,
             providers: configured_providers,
+            environment,
             template,
             ..SandboxSpec::default()
         }),

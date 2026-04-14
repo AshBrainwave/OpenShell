@@ -1143,6 +1143,12 @@ enum SandboxCommands {
         #[arg(long = "provider")]
         providers: Vec<String>,
 
+        /// Environment variable to inject into the sandbox supervisor.
+        ///
+        /// Repeat for multiple entries. Format: `KEY=VALUE`.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
         /// Path to a custom sandbox policy YAML file.
         /// Overrides the built-in default and the `OPENSHELL_SANDBOX_POLICY` env var.
         #[arg(long, value_hint = ValueHint::FilePath)]
@@ -2451,6 +2457,7 @@ async fn main() -> Result<()> {
                     remote,
                     ssh_key,
                     providers,
+                    env,
                     policy,
                     forward,
                     tty,
@@ -2533,6 +2540,7 @@ async fn main() -> Result<()> {
                                 remote.as_deref(),
                                 ssh_key.as_deref(),
                                 &providers,
+                                &env,
                                 policy.as_deref(),
                                 forward,
                                 &command,
@@ -2555,6 +2563,7 @@ async fn main() -> Result<()> {
                                 remote.as_deref(),
                                 ssh_key.as_deref(),
                                 &providers,
+                                &env,
                                 policy.as_deref(),
                                 forward,
                                 &command,
