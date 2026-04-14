@@ -8,6 +8,7 @@
 pub mod bypass_monitor;
 mod child_env;
 pub mod comch_transport;
+pub mod dpu_control_agent;
 pub mod denial_aggregator;
 mod grpc_client;
 mod identity;

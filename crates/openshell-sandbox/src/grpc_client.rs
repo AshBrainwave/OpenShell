@@ -264,6 +264,23 @@ impl CachedOpenShellClient {
         })
     }
 
+    /// Fetch provider environment using the existing gRPC channel.
+    pub async fn fetch_provider_environment(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<HashMap<String, String>> {
+        let response = self
+            .client
+            .clone()
+            .get_sandbox_provider_environment(GetSandboxProviderEnvironmentRequest {
+                sandbox_id: sandbox_id.to_string(),
+            })
+            .await
+            .into_diagnostic()?;
+
+        Ok(response.into_inner().environment)
+    }
+
     /// Submit denial summaries for policy analysis.
     pub async fn submit_policy_analysis(
         &self,
