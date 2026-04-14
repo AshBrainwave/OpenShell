@@ -112,6 +112,12 @@ struct Args {
     /// agents can reach the proxy at the DPU's IP (`192.168.100.2:8080`).
     #[arg(long, env = "OPENSHELL_LISTEN")]
     listen: Option<String>,
+
+    /// Optional upstream HTTP proxy used by the supervisor as its next hop.
+    /// For BF3 managed-proxy this should point at the DPU proxy
+    /// (for example `10.99.2.1:3128`).
+    #[arg(long, env = "OPENSHELL_UPSTREAM_HTTP_PROXY")]
+    upstream_http_proxy: Option<String>,
 }
 
 #[tokio::main]
@@ -247,6 +253,7 @@ async fn main() -> Result<()> {
         args.dpu_opa_url,
         args.dpu_credentials,
         args.listen,
+        args.upstream_http_proxy,
     )
     .await?;
 

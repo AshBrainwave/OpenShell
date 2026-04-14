@@ -225,6 +225,8 @@ pub async fn run_sandbox(
     // Explicit proxy listen address (e.g. 0.0.0.0:8080).
     // Bypasses loopback-only restriction. Required in DPU mode.
     listen_addr: Option<String>,
+    // Optional upstream HTTP proxy used by the supervisor as its next hop.
+    upstream_http_proxy: Option<String>,
 ) -> Result<i32> {
     let (program, args) = command
         .split_first()
@@ -258,7 +260,7 @@ pub async fn run_sandbox(
     // Load policy and initialize OPA engine
     let openshell_endpoint_for_proxy = openshell_endpoint.clone();
     let sandbox_name_for_agg = sandbox.clone();
-    let (policy, opa_engine) = if let Some(ref rest_url) = dpu_opa_url {
+    let (mut policy, opa_engine) = if let Some(ref rest_url) = dpu_opa_url {
         // DPU mode: create a minimal proxy policy and a REST-backed OPA engine.
         // No local policy files or gRPC are needed — the OPA daemon on the DPU
         // ARM handles all policy evaluation at 127.0.0.1:8181.
@@ -268,7 +270,10 @@ pub async fn run_sandbox(
             filesystem: crate::policy::FilesystemPolicy::default(),
             network: crate::policy::NetworkPolicy {
                 mode: crate::policy::NetworkMode::Proxy,
-                proxy: Some(crate::policy::ProxyPolicy { http_addr: None }),
+                proxy: Some(crate::policy::ProxyPolicy {
+                    http_addr: None,
+                    upstream_http_proxy: None,
+                }),
             },
             landlock: crate::policy::LandlockPolicy::default(),
             process: crate::policy::ProcessPolicy::default(),
@@ -285,6 +290,21 @@ pub async fn run_sandbox(
         )
         .await?
     };
+
+    if let Some(addr_str) = upstream_http_proxy {
+        let addr: SocketAddr = addr_str
+            .parse()
+            .map_err(|e| miette::miette!("Invalid --upstream-http-proxy address '{addr_str}': {e}"))?;
+        let proxy = policy
+            .network
+            .proxy
+            .get_or_insert(crate::policy::ProxyPolicy {
+                http_addr: None,
+                upstream_http_proxy: None,
+            });
+        proxy.upstream_http_proxy = Some(addr);
+        info!(upstream_http_proxy = %addr, "Supervisor proxy: configured upstream HTTP proxy");
+    }
 
     // Validate that the required "sandbox" user exists in this image.
     // Skipped in DPU mode — the proxy runs on the DPU ARM where no "sandbox"
@@ -1006,7 +1026,10 @@ pub async fn run_dpu_proxy(
         .map_err(|e| miette::miette!("Invalid --listen address '{listen_addr}': {e}"))?;
     info!(addr = %bind_addr, "DPU proxy: starting");
 
-    let proxy_policy = crate::policy::ProxyPolicy { http_addr: None };
+    let proxy_policy = crate::policy::ProxyPolicy {
+        http_addr: None,
+        upstream_http_proxy: None,
+    };
     let _proxy = proxy::ProxyHandle::start_with_bind_addr(
         &proxy_policy,
         Some(bind_addr),
@@ -2038,7 +2061,10 @@ async fn load_policy(
             filesystem: config.filesystem,
             network: NetworkPolicy {
                 mode: NetworkMode::Proxy,
-                proxy: Some(ProxyPolicy { http_addr: None }),
+                proxy: Some(ProxyPolicy {
+                    http_addr: None,
+                    upstream_http_proxy: None,
+                }),
             },
             landlock: config.landlock,
             process: config.process,
