@@ -13,18 +13,22 @@
 fn main() {
     let doca_include = "/opt/mellanox/doca/include";
     let doca_lib = "/opt/mellanox/doca/lib/aarch64-linux-gnu";
+    let cc_wrapper_src = "../../openshell-bluefield/dpu/proxy/doca_cc_server.c";
+    let cc_wrapper_hdr = "../../openshell-bluefield/dpu/proxy/doca_cc_server.h";
 
     // Only attempt the DOCA build if the headers exist (i.e. we're on the DPU ARM).
     let has_doca = std::path::Path::new(doca_include).join("doca_comch.h").exists();
+    let has_cc_wrapper = std::path::Path::new(cc_wrapper_src).exists()
+        && std::path::Path::new(cc_wrapper_hdr).exists();
 
     // Rerun if the C source changes.
-    println!("cargo:rerun-if-changed=../../openshell-bluefield/dpu/proxy/doca_cc_server.c");
-    println!("cargo:rerun-if-changed=../../openshell-bluefield/dpu/proxy/doca_cc_server.h");
+    println!("cargo:rerun-if-changed={cc_wrapper_src}");
+    println!("cargo:rerun-if-changed={cc_wrapper_hdr}");
 
-    if has_doca {
+    if has_doca && has_cc_wrapper {
         // Full build: compile the real C wrapper and link DOCA.
         cc::Build::new()
-            .file("../../openshell-bluefield/dpu/proxy/doca_cc_server.c")
+            .file(cc_wrapper_src)
             .include(doca_include)
             .flag("-pthread")
             .compile("doca_cc_server");
@@ -37,6 +41,11 @@ fn main() {
         println!("cargo:rustc-link-lib=pthread");
         println!("cargo:rustc-link-search=native={doca_lib}");
     } else {
+        if has_doca && !has_cc_wrapper {
+            println!(
+                "cargo:warning=DOCA headers are present but Comm Channel wrapper sources are missing; building comch stub so TCP mode remains available"
+            );
+        }
         // Stub build: emit a minimal object that satisfies the linker on non-DPU hosts.
         // The cc_server_* symbols are defined as no-ops / null returns so the crate
         // compiles, but the comch transport will not function at runtime.
