@@ -1148,6 +1148,12 @@ enum SandboxCommands {
         #[arg(long, value_hint = ValueHint::FilePath)]
         policy: Option<String>,
 
+        /// Environment override injected into the sandbox spec.
+        ///
+        /// Accepts `KEY=VALUE`. May be repeated.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+
         /// Forward a local port to the sandbox before the initial command or shell starts.
         /// Accepts [bind_address:]port (e.g. 8080, 0.0.0.0:8080). Keeps the sandbox alive.
         #[arg(long, conflicts_with = "no_keep")]
@@ -2452,6 +2458,7 @@ async fn main() -> Result<()> {
                     ssh_key,
                     providers,
                     policy,
+                    env,
                     forward,
                     tty,
                     no_tty,
@@ -2534,6 +2541,7 @@ async fn main() -> Result<()> {
                                 ssh_key.as_deref(),
                                 &providers,
                                 policy.as_deref(),
+                                &env,
                                 forward,
                                 &command,
                                 tty_override,
@@ -2556,6 +2564,7 @@ async fn main() -> Result<()> {
                                 ssh_key.as_deref(),
                                 &providers,
                                 policy.as_deref(),
+                                &env,
                                 forward,
                                 &command,
                                 tty_override,

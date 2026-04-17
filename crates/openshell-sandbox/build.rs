@@ -13,18 +13,23 @@
 fn main() {
     let doca_include = "/opt/mellanox/doca/include";
     let doca_lib = "/opt/mellanox/doca/lib/aarch64-linux-gnu";
+    let manifest_dir =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let doca_cc_src = manifest_dir.join("../../openshell-bluefield/dpu/proxy/doca_cc_server.c");
+    let doca_cc_hdr = manifest_dir.join("../../openshell-bluefield/dpu/proxy/doca_cc_server.h");
 
     // Only attempt the DOCA build if the headers exist (i.e. we're on the DPU ARM).
     let has_doca = std::path::Path::new(doca_include).join("doca_comch.h").exists();
+    let has_doca_cc_sources = doca_cc_src.exists() && doca_cc_hdr.exists();
 
     // Rerun if the C source changes.
-    println!("cargo:rerun-if-changed=../../openshell-bluefield/dpu/proxy/doca_cc_server.c");
-    println!("cargo:rerun-if-changed=../../openshell-bluefield/dpu/proxy/doca_cc_server.h");
+    println!("cargo:rerun-if-changed={}", doca_cc_src.display());
+    println!("cargo:rerun-if-changed={}", doca_cc_hdr.display());
 
-    if has_doca {
+    if has_doca && has_doca_cc_sources {
         // Full build: compile the real C wrapper and link DOCA.
         cc::Build::new()
-            .file("../../openshell-bluefield/dpu/proxy/doca_cc_server.c")
+            .file(&doca_cc_src)
             .include(doca_include)
             .flag("-pthread")
             .compile("doca_cc_server");
@@ -37,6 +42,13 @@ fn main() {
         println!("cargo:rustc-link-lib=pthread");
         println!("cargo:rustc-link-search=native={doca_lib}");
     } else {
+        if has_doca && !has_doca_cc_sources {
+            println!(
+                "cargo:warning=DOCA headers found but {} / {} are missing; building stub doca_cc_server and disabling comch transport",
+                doca_cc_src.display(),
+                doca_cc_hdr.display()
+            );
+        }
         // Stub build: emit a minimal object that satisfies the linker on non-DPU hosts.
         // The cc_server_* symbols are defined as no-ops / null returns so the crate
         // compiles, but the comch transport will not function at runtime.

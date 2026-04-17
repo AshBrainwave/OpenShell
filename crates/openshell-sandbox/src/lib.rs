@@ -8,6 +8,7 @@
 pub mod bypass_monitor;
 mod child_env;
 pub mod comch_transport;
+pub mod dpu_control_agent;
 pub mod denial_aggregator;
 mod grpc_client;
 mod identity;
@@ -919,6 +920,7 @@ pub async fn run_dpu_proxy(
     credentials_path: Option<String>,
     inference_routes: Option<String>,
     ca_cert_out: Option<String>,
+    disable_tls_mitm: bool,
 ) -> Result<()> {
     // OPA REST engine — every CONNECT is evaluated via POST to the OPA daemon.
     let opa_engine = Arc::new(OpaEngine::rest_only(opa_url.clone()));
@@ -964,34 +966,40 @@ pub async fn run_dpu_proxy(
     let (_, secret_resolver) = SecretResolver::from_provider_env(provider_env);
     let secret_resolver = secret_resolver.map(Arc::new);
 
-    // TLS: generate ephemeral CA for MITM. Write cert to ca_cert_out so the
-    // operator can install it in the host agent's trust store.
-    let tls_state = match crate::l7::tls::SandboxCa::generate() {
-        Ok(ca) => {
-            // Write CA cert so the operator can copy it to the host.
-            let cert_path = ca_cert_out
-                .as_deref()
-                .unwrap_or("/tmp/openshell-dpu-ca.crt");
-            if let Err(e) = std::fs::write(cert_path, ca.cert_pem()) {
-                warn!(error = %e, path = %cert_path, "DPU proxy: failed to write CA cert");
-            } else {
-                info!(
-                    path = %cert_path,
-                    "DPU proxy: CA cert written — install on host with:\n  \
-                     sudo cp {cert_path} /usr/local/share/ca-certificates/openshell-dpu-ca.crt\n  \
-                     sudo update-ca-certificates"
-                );
+    // TLS: for upstream-proxy chaining, the DPU proxy must behave as a plain
+    // CONNECT tunnel. A second TLS MITM here causes the host-side supervisor
+    // to see the DPU proxy CA instead of the real upstream certificate.
+    let tls_state = if disable_tls_mitm {
+        info!("DPU proxy: TLS MITM disabled; running in CONNECT tunnel mode");
+        None
+    } else {
+        match crate::l7::tls::SandboxCa::generate() {
+            Ok(ca) => {
+                // Write CA cert so the operator can copy it to the host.
+                let cert_path = ca_cert_out
+                    .as_deref()
+                    .unwrap_or("/tmp/openshell-dpu-ca.crt");
+                if let Err(e) = std::fs::write(cert_path, ca.cert_pem()) {
+                    warn!(error = %e, path = %cert_path, "DPU proxy: failed to write CA cert");
+                } else {
+                    info!(
+                        path = %cert_path,
+                        "DPU proxy: CA cert written — install on host with:\n  \
+                         sudo cp {cert_path} /usr/local/share/ca-certificates/openshell-dpu-ca.crt\n  \
+                         sudo update-ca-certificates"
+                    );
+                }
+                let upstream_config = crate::l7::tls::build_upstream_client_config();
+                let cert_cache = crate::l7::tls::CertCache::new(ca);
+                Some(Arc::new(crate::l7::tls::ProxyTlsState::new(
+                    cert_cache,
+                    upstream_config,
+                )))
             }
-            let upstream_config = crate::l7::tls::build_upstream_client_config();
-            let cert_cache = crate::l7::tls::CertCache::new(ca);
-            Some(Arc::new(crate::l7::tls::ProxyTlsState::new(
-                cert_cache,
-                upstream_config,
-            )))
-        }
-        Err(e) => {
-            warn!(error = %e, "DPU proxy: failed to generate CA, TLS termination disabled");
-            None
+            Err(e) => {
+                warn!(error = %e, "DPU proxy: failed to generate CA, TLS termination disabled");
+                None
+            }
         }
     };
 
@@ -1056,6 +1064,7 @@ pub async fn run_dpu_proxy_cc(
     opa_url: String,
     credentials_path: Option<String>,
     inference_routes: Option<String>,
+    disable_tls_mitm: bool,
 ) -> Result<()> {
     use crate::comch_transport::ComchListener;
 
@@ -1095,29 +1104,37 @@ pub async fn run_dpu_proxy_cc(
     let secret_resolver = secret_resolver.map(Arc::new);
 
     // TLS ephemeral CA
-    let tls_state = match crate::l7::tls::SandboxCa::generate() {
-        Ok(ca) => {
-            let cert_path = "/tmp/openshell-dpu-ca.crt";
-            if let Err(e) = std::fs::write(cert_path, ca.cert_pem()) {
-                warn!(error = %e, path = %cert_path, "DPU proxy (comch): failed to write CA cert");
-            } else {
-                info!(
-                    path = %cert_path,
-                    "DPU proxy (comch): CA cert written — install on host with:\n  \
-                     sudo cp {cert_path} /usr/local/share/ca-certificates/openshell-dpu-ca.crt\n  \
-                     sudo update-ca-certificates"
-                );
+    // TLS MITM is optional for the same reason as TCP mode: when this proxy is
+    // chained behind another OpenShell supervisor, a second MITM breaks the
+    // upstream TLS trust model.
+    let tls_state = if disable_tls_mitm {
+        info!("DPU proxy (comch): TLS MITM disabled; running in CONNECT tunnel mode");
+        None
+    } else {
+        match crate::l7::tls::SandboxCa::generate() {
+            Ok(ca) => {
+                let cert_path = "/tmp/openshell-dpu-ca.crt";
+                if let Err(e) = std::fs::write(cert_path, ca.cert_pem()) {
+                    warn!(error = %e, path = %cert_path, "DPU proxy (comch): failed to write CA cert");
+                } else {
+                    info!(
+                        path = %cert_path,
+                        "DPU proxy (comch): CA cert written — install on host with:\n  \
+                         sudo cp {cert_path} /usr/local/share/ca-certificates/openshell-dpu-ca.crt\n  \
+                         sudo update-ca-certificates"
+                    );
+                }
+                let upstream_config = crate::l7::tls::build_upstream_client_config();
+                let cert_cache = crate::l7::tls::CertCache::new(ca);
+                Some(Arc::new(crate::l7::tls::ProxyTlsState::new(
+                    cert_cache,
+                    upstream_config,
+                )))
             }
-            let upstream_config = crate::l7::tls::build_upstream_client_config();
-            let cert_cache = crate::l7::tls::CertCache::new(ca);
-            Some(Arc::new(crate::l7::tls::ProxyTlsState::new(
-                cert_cache,
-                upstream_config,
-            )))
-        }
-        Err(e) => {
-            warn!(error = %e, "DPU proxy (comch): failed to generate CA, TLS termination disabled");
-            None
+            Err(e) => {
+                warn!(error = %e, "DPU proxy (comch): failed to generate CA, TLS termination disabled");
+                None
+            }
         }
     };
 

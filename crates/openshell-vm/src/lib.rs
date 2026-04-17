@@ -108,6 +108,20 @@ pub enum NetBackend {
     },
 }
 
+/// Configuration for the protected-egress NIC (guest eth1).
+///
+/// The socket must be served by a bridge process (for example `vf-bridge`)
+/// that relays raw Ethernet frames between a UNIX stream socket and a host VF
+/// wired into the BlueField datapath.
+#[derive(Debug, Clone)]
+pub struct ProtectedEgressConfig {
+    /// Path to the UNIX stream socket served by the host-side bridge process.
+    pub socket_path: PathBuf,
+
+    /// Guest-visible MAC address for eth1.
+    pub mac: [u8; 6],
+}
+
 /// Host Unix socket bridged into the guest as a vsock port.
 #[derive(Debug, Clone)]
 pub struct VsockPort {
@@ -184,6 +198,9 @@ pub struct VmConfig {
     /// Networking backend.
     pub net: NetBackend,
 
+    /// Optional protected-egress NIC (guest eth1).
+    pub protected_egress: Option<ProtectedEgressConfig>,
+
     /// Wipe all runtime state (containerd tasks/sandboxes, kubelet pods)
     /// before booting. Recovers from corrupted state after a crash.
     pub reset: bool,
@@ -236,6 +253,7 @@ impl VmConfig {
             reset: false,
             gateway_name: format!("{GATEWAY_NAME_PREFIX}-default"),
             state_disk: Some(state_disk),
+            protected_egress: None,
         }
     }
 }
@@ -1430,6 +1448,28 @@ pub fn launch(config: &VmConfig) -> Result<i32, VmError> {
             );
             gvproxy_guard = Some(GvproxyGuard::new(child));
             gvproxy_api_sock = Some(api_sock);
+        }
+    }
+
+    if let Some(pe) = &config.protected_egress {
+        #[cfg(target_os = "linux")]
+        {
+            // This lane is a plain software relay:
+            // virtio-net -> unixstream -> vf-bridge -> VF.
+            // Do not advertise checksum or segmentation offloads here.
+            const PE_COMPAT_NET_FEATURES: u32 = 0;
+            vm.add_net_unixstream(&pe.socket_path, &pe.mac, PE_COMPAT_NET_FEATURES)?;
+            eprintln!(
+                "Protected egress: virtio-net via {} [{:.1}s]",
+                pe.socket_path.display(),
+                launch_start.elapsed().as_secs_f64()
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(VmError::HostSetup(
+                "protected-egress NIC requires Linux".to_string(),
+            ));
         }
     }
 

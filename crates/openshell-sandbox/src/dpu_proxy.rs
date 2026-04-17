@@ -11,6 +11,7 @@
 //!   openshell-dpu-proxy \
 //!     --listen 0.0.0.0:8080 \
 //!     --opa-url http://127.0.0.1:8181 \
+//!     --disable-tls-mitm \
 //!     --credentials /home/ubuntu/openshell-dpu/credentials.json \
 //!     --inference-routes /home/ubuntu/openshell-dpu/routes.yaml
 //!
@@ -58,6 +59,13 @@ struct Args {
         env = "OPENSHELL_DPU_CA_CERT_OUT"
     )]
     ca_cert_out: String,
+
+    /// Disable TLS MITM and operate as a plain CONNECT tunnel after policy allow.
+    ///
+    /// This is the correct mode when the DPU proxy is itself chained behind
+    /// another OpenShell supervisor acting as an upstream HTTP proxy client.
+    #[arg(long, env = "OPENSHELL_DISABLE_TLS_MITM", default_value_t = false)]
+    disable_tls_mitm: bool,
 
     // ---- Comm Channel mode args ----
 
@@ -131,6 +139,7 @@ async fn main() -> Result<()> {
                 args.credentials,
                 args.inference_routes,
                 Some(args.ca_cert_out),
+                args.disable_tls_mitm,
             )
             .await
         }
@@ -149,6 +158,7 @@ async fn main() -> Result<()> {
                 args.opa_url,
                 args.credentials,
                 args.inference_routes,
+                args.disable_tls_mitm,
             )
             .await
         }

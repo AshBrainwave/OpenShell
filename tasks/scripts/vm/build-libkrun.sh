@@ -256,12 +256,19 @@ cd libkrun
 echo "    Building libkrun with NET=1 BLK=1..."
 
 # Locate libclang for clang-sys if LIBCLANG_PATH isn't already set.
-# clang-sys looks for libclang.so or libclang-*.so; on Debian/Ubuntu the
-# versioned file (e.g. libclang-18.so.18) lives under the LLVM lib dir.
+# clang-sys looks for libclang.so or libclang-*.so. On some hosts the shared
+# library lives under /usr/lib/llvm-*/lib, while on others it is installed in
+# the normal system library directories such as /lib/x86_64-linux-gnu.
 if [ -z "${LIBCLANG_PATH:-}" ]; then
-  for llvm_lib in /usr/lib/llvm-*/lib; do
-    if ls "$llvm_lib"/libclang*.so* &>/dev/null; then
-      export LIBCLANG_PATH="$llvm_lib"
+  for lib_dir in \
+    /usr/lib/llvm-*/lib \
+    /lib/x86_64-linux-gnu \
+    /usr/lib/x86_64-linux-gnu \
+    /lib/aarch64-linux-gnu \
+    /usr/lib/aarch64-linux-gnu
+  do
+    if ls "$lib_dir"/libclang*.so* &>/dev/null; then
+      export LIBCLANG_PATH="$lib_dir"
       echo "    LIBCLANG_PATH=$LIBCLANG_PATH"
       break
     fi

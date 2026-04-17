@@ -12,6 +12,9 @@
 set -euo pipefail
 
 BOOT_START=$(date +%s%3N 2>/dev/null || date +%s)
+IMAGE_REPO_BASE="${IMAGE_REPO_BASE:-openshell}"
+IMAGE_TAG="${IMAGE_TAG:-dev}"
+SERVER_IMAGE="${IMAGE_REPO_BASE}/gateway:${IMAGE_TAG}"
 
 ts() {
     local now
@@ -128,6 +131,39 @@ else
     ip route add default dev dummy0  2>/dev/null || true
 
     NODE_IP="10.0.2.15"
+fi
+
+# ── Protected-egress NIC (eth1 / guest virtio-net via vf-bridge) ────────
+if ip link show eth1 >/dev/null 2>&1; then
+    ts "detected eth1 (protected-egress NIC)"
+    ip link set eth1 up 2>/dev/null || true
+    ip addr add 10.99.2.2/24 dev eth1 2>/dev/null || true
+
+    if command -v ethtool >/dev/null 2>&1; then
+        ethtool -K eth1 rx off tx off tso off gso off gro off lro off sg off rxvlan off txvlan off 2>/dev/null || true
+        ts "eth1 offloads disabled for software protected-egress path"
+    else
+        ts "ethtool not installed; leaving eth1 offloads unchanged"
+    fi
+
+    EGRESS_GW="10.99.2.1"
+    EGRESS_GW_MAC="02:00:00:00:00:01"
+    EGRESS_TABLE=100
+    POD_SUPERNET_CIDR="10.42.0.0/16"
+    SERVICE_CIDR="10.43.0.0/16"
+    NODE_MGMT_CIDR="192.168.127.0/24"
+
+    ip neigh replace "$EGRESS_GW" lladdr "$EGRESS_GW_MAC" dev eth1 nud permanent 2>/dev/null || true
+    ip route add default via "$EGRESS_GW" dev eth1 table "$EGRESS_TABLE" 2>/dev/null || true
+
+    ip rule add from "$POD_SUPERNET_CIDR" to "$POD_SUPERNET_CIDR" lookup main priority 90 2>/dev/null || true
+    ip rule add from "$POD_SUPERNET_CIDR" to "$SERVICE_CIDR" lookup main priority 91 2>/dev/null || true
+    ip rule add from "$POD_SUPERNET_CIDR" to "$NODE_MGMT_CIDR" lookup main priority 92 2>/dev/null || true
+    ip rule add from "$POD_SUPERNET_CIDR" lookup "$EGRESS_TABLE" priority 100 2>/dev/null || true
+
+    ts "eth1 up: 10.99.2.2/24, policy route: pod egress via table $EGRESS_TABLE; cluster/service/node traffic stays on main"
+else
+    ts "no eth1 found (protected-egress NIC not attached)"
 fi
 
 # ── k3s data directories ───────────────────────────────────────────────
@@ -418,6 +454,9 @@ if [ -f "$HELMCHART" ]; then
     sed -i 's|__IMAGE_PULL_POLICY__|IfNotPresent|g' "$HELMCHART"
     sed -i 's|__SANDBOX_IMAGE_PULL_POLICY__|"IfNotPresent"|g' "$HELMCHART"
     sed -i 's|__DB_URL__|"sqlite:/tmp/openshell.db"|g' "$HELMCHART"
+    # Match the runtime manifest to the airgap image imported into containerd.
+    sed -i -E "s|repository:[[:space:]]*[^[:space:]]+|repository: ${SERVER_IMAGE%:*}|" "$HELMCHART"
+    sed -i -E "s|tag:[[:space:]]*\"?[^\"[:space:]]+\"?|tag: \"${IMAGE_TAG}\"|" "$HELMCHART"
     # Clear SSH gateway placeholders (default 127.0.0.1 is correct for local VM).
     sed -i 's|sshGatewayHost: __SSH_GATEWAY_HOST__|sshGatewayHost: ""|g' "$HELMCHART"
     sed -i 's|sshGatewayPort: __SSH_GATEWAY_PORT__|sshGatewayPort: 0|g' "$HELMCHART"
@@ -425,6 +464,7 @@ if [ -f "$HELMCHART" ]; then
     sed -i 's|__DISABLE_TLS__|false|g' "$HELMCHART"
     sed -i 's|hostGatewayIP: __HOST_GATEWAY_IP__|hostGatewayIP: ""|g' "$HELMCHART"
     sed -i '/__CHART_CHECKSUM__/d' "$HELMCHART"
+    ts "patched openshell HelmChart for local image ${SERVER_IMAGE}"
 fi
 
 AGENT_MANIFEST="$K3S_MANIFESTS/agent-sandbox.yaml"

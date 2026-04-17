@@ -22,12 +22,13 @@
 # is auto-detected from the host but can be overridden with --arch.
 #
 # Usage:
-#   ./build-rootfs.sh [--base] [--arch aarch64|x86_64] [output_dir]
+#   ./build-rootfs.sh [--base] [--skip-preinit] [--arch aarch64|x86_64] [output_dir]
 #
 # If output_dir is omitted, the rootfs is built under target/rootfs-build.
 #
 # Requires: Docker (or compatible container runtime), curl, helm
-# Full mode (default) also requires: zstd, sqlite3, a built openshell-vm binary
+# Full mode (default) also requires: zstd, sqlite3, and a built openshell-vm
+# binary
 
 set -euo pipefail
 
@@ -43,18 +44,26 @@ fi
 
 # ── Argument parsing ───────────────────────────────────────────────────
 BASE_ONLY=false
+SKIP_PREINIT=false
 GUEST_ARCH=""
 POSITIONAL_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --base)
             BASE_ONLY=true; shift ;;
+        --skip-preinit)
+            SKIP_PREINIT=true; shift ;;
         --arch)
             GUEST_ARCH="$2"; shift 2 ;;
         *)
             POSITIONAL_ARGS+=("$1"); shift ;;
     esac
 done
+
+if [ "$BASE_ONLY" = true ] && [ "$SKIP_PREINIT" = true ]; then
+    echo "ERROR: --base and --skip-preinit are mutually exclusive" >&2
+    exit 1
+fi
 
 # ── Architecture detection ─────────────────────────────────────────────
 # Allow override via --arch flag; default to host architecture.
@@ -125,6 +134,13 @@ if [ "$BASE_ONLY" = true ]; then
     echo "    k3s version: ${K3S_VERSION}"
     echo "    Output:      ${ROOTFS_DIR}"
     echo "    Mode:        base (no pre-loaded images, cold start)"
+elif [ "$SKIP_PREINIT" = true ]; then
+    echo "==> Building openshell-vm rootfs"
+    echo "    Guest arch:  ${GUEST_ARCH}"
+    echo "    k3s version: ${K3S_VERSION}"
+    echo "    Images:      ${SERVER_IMAGE}, ${COMMUNITY_SANDBOX_IMAGE}"
+    echo "    Output:      ${ROOTFS_DIR}"
+    echo "    Mode:        full (pre-loaded images, pre-init skipped)"
 else
     echo "==> Building openshell-vm rootfs"
     echo "    Guest arch:  ${GUEST_ARCH}"
@@ -230,6 +246,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         e2fsprogs \
+        ethtool \
         iptables \
         iproute2 \
         python3 \
@@ -302,14 +319,18 @@ SUPERVISOR_TARGET="${RUST_TARGET}"
 SUPERVISOR_BIN="${PROJECT_ROOT}/target/${SUPERVISOR_TARGET}/release/openshell-sandbox"
 
 echo "==> Building openshell-sandbox supervisor binary (${SUPERVISOR_TARGET})..."
-if command -v cargo-zigbuild >/dev/null 2>&1; then
+if command -v cargo-zigbuild >/dev/null 2>&1 && command -v zig >/dev/null 2>&1; then
     cargo zigbuild --release -p openshell-sandbox --target "${SUPERVISOR_TARGET}" \
         --manifest-path "${PROJECT_ROOT}/Cargo.toml" 2>&1 | tail -5
 else
     # Fallback: use plain cargo build when cargo-zigbuild is not available.
     # This works for native builds (e.g. building x86_64 on x86_64) but
     # will fail for true cross-compilation without a cross toolchain.
-    echo "    cargo-zigbuild not found, falling back to cargo build..."
+    if command -v cargo-zigbuild >/dev/null 2>&1 && ! command -v zig >/dev/null 2>&1; then
+        echo "    cargo-zigbuild is installed but zig is unavailable; falling back to cargo build..."
+    else
+        echo "    cargo-zigbuild not found, falling back to cargo build..."
+    fi
     cargo build --release -p openshell-sandbox --target "${SUPERVISOR_TARGET}" \
         --manifest-path "${PROJECT_ROOT}/Cargo.toml" 2>&1 | tail -5
 fi
@@ -450,6 +471,41 @@ pull_and_save() {
 pull_and_save "${SERVER_IMAGE}" "${IMAGES_DIR}/openshell-server.tar.zst"
 pull_and_save "${AGENT_SANDBOX_IMAGE}" "${IMAGES_DIR}/agent-sandbox-controller.tar.zst"
 pull_and_save "${COMMUNITY_SANDBOX_IMAGE}" "${IMAGES_DIR}/community-sandbox-base.tar.zst"
+
+if [ "$SKIP_PREINIT" = true ]; then
+    rm -f "${ROOTFS_DIR}/opt/openshell/.initialized"
+    echo "full" > "${ROOTFS_DIR}/opt/openshell/.rootfs-type"
+
+    if [ ! -f "${ROOTFS_DIR}/usr/local/bin/k3s" ]; then
+        echo "ERROR: k3s binary not found in rootfs. Something went wrong."
+        exit 1
+    fi
+
+    if [ ! -x "${ROOTFS_DIR}/opt/openshell/bin/openshell-sandbox" ]; then
+        echo "ERROR: openshell-sandbox supervisor binary not found in rootfs."
+        echo "       Sandbox pods will fail with CreateContainerError."
+        exit 1
+    fi
+
+    echo ""
+    echo "==> Rootfs ready at: ${ROOTFS_DIR}"
+    echo "    Size: $(du -sh "${ROOTFS_DIR}" | cut -f1)"
+    echo "    Pre-initialized: no (skipped)"
+
+    K3S_DATA="${ROOTFS_DIR}/var/lib/rancher/k3s"
+    if [ -d "${K3S_DATA}" ]; then
+        echo "    k3s state: $(du -sh "${K3S_DATA}" | cut -f1)"
+    fi
+
+    if [ -x "${ROOTFS_DIR}/opt/openshell/bin/openshell-sandbox" ]; then
+        echo "    Supervisor: $(du -h "${ROOTFS_DIR}/opt/openshell/bin/openshell-sandbox" | cut -f1)"
+    fi
+
+    echo ""
+    echo "Note: First VM boot will still cold-start k3s,"
+    echo "      but container images are already baked into the rootfs."
+    exit 0
+fi
 
 # ── Pre-initialize k3s cluster state ─────────────────────────────────
 # Boot k3s inside a Docker container using the rootfs we just built.

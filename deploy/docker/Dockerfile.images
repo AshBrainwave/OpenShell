@@ -77,6 +77,8 @@ RUN mkdir -p \
     touch crates/openshell-router/src/lib.rs && \
     touch crates/openshell-sandbox/src/lib.rs && \
     printf 'fn main() {}\n' > crates/openshell-sandbox/src/main.rs && \
+    printf 'fn main() {}\n' > crates/openshell-sandbox/src/dpu_proxy.rs && \
+    printf 'fn main() {}\n' > crates/openshell-sandbox/src/dpu_agent.rs && \
     touch crates/openshell-server/src/lib.rs && \
     printf 'fn main() {}\n' > crates/openshell-server/src/main.rs && \
     touch crates/openshell-tui/src/lib.rs
@@ -140,6 +142,8 @@ COPY crates/openshell-sandbox/ crates/openshell-sandbox/
 RUN touch \
     crates/openshell-core/build.rs \
     crates/openshell-ocsf/src/lib.rs \
+    crates/openshell-sandbox/src/dpu_agent.rs \
+    crates/openshell-sandbox/src/dpu_proxy.rs \
     crates/openshell-sandbox/src/main.rs \
     proto/*.proto && \
     if [ -n "${OPENSHELL_CARGO_VERSION:-}" ]; then \
