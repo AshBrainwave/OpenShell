@@ -104,7 +104,24 @@ not:
 
 - `policy -> current standalone SF/VNF DOCA sample app`
 
-## Current BF3 gap for hostless L7 injection
+We also proved the end-to-end chained operator path:
+
+```text
+sandbox process -> supervisor proxy (10.200.0.1:3128)
+                -> DPU proxy (10.99.2.1:3128)
+                -> upstream TLS server
+```
+
+That path now works for a real user shell inside the sandbox, not just for a
+host-driven probe. The critical pieces were:
+
+- suppressing host-generated TCP RST packets on the protected VF so the host
+  kernel does not tear down guest flows before DPU userspace can accept them
+- syncing the DPU MITM CA into the sandbox trust bundle
+- teaching the supervisor upstream TLS client to load that synced CA material
+  so supervisor-to-DPU TLS MITM chaining succeeds without a separate restart
+
+## Current BF3 status for hostless L7 injection
 
 The DPU proxy already knows how to load `credentials.json` locally and build a
 `SecretResolver` from it:
@@ -114,19 +131,14 @@ The DPU proxy already knows how to load `credentials.json` locally and build a
 - `crates/openshell-sandbox/src/lib.rs:1091`
 - `crates/openshell-sandbox/src/lib.rs:1115`
 
-However, the current BF3 demo launcher starts `openshell-dpu-proxy` with
-`--disable-tls-mitm`:
+The BF3 demo launcher now supports both modes:
 
-- `openshell-bf3-managed-proxy-demo/scripts/dpu-managed-proxy-remote.sh:187`
+- CONNECT-tunnel mode with `--disable-tls-mitm`
+- DPU TLS MITM mode for hostless HTTPS plaintext visibility
 
-That means the current DPU proxy instance is running as a CONNECT tunnel for
-the MVP chain, not as the L7/TLS termination owner for HTTPS traffic. In that
-mode, the DPU can still own coarse allow/drop, but it cannot perform plaintext
-HTTP auth insertion for encrypted upstream traffic because it never sees the
-decrypted request.
-
-So the real blocker is not DOCA Flow.
-The blocker is ownership of the plaintext HTTP view.
+In DPU TLS MITM mode, the DPU proxy is the L7/TLS termination owner for HTTPS
+traffic, so the DPU can actually perform plaintext HTTP auth insertion for
+encrypted upstream traffic.
 
 ## Recommended architecture
 
@@ -153,12 +165,16 @@ Longer-term research:
 
 ## Next implementation steps
 
-1. Make the BF3 launcher support a mode where the DPU proxy owns TLS MITM
-   instead of always forcing `--disable-tls-mitm`.
-2. Ensure the host-side component becomes a plain tunnel/client in that mode,
-   not a second TLS MITM.
+1. Exercise a real credential-insertion target through the now-working chained
+   path:
+   - sandbox process -> supervisor -> DPU MITM -> upstream
+2. Show the step-by-step control/data path clearly in tooling and demos:
+   - sandbox shell
+   - supervisor logs
+   - host protected-egress VF
+   - DPU proxy / OPA
+   - DPU OVS flows on `ovsbr1`
 3. Keep provider credentials on the DPU in `credentials.json` and set
    `OPENSHELL_CREDENTIAL_OWNER=dpu` on the host side for that path.
-4. Re-prove the protected path with:
-   - coarse drop/allow on `ovsbr1`
-   - successful header injection from the DPU proxy on a real upstream target
+4. Replace the current example.com proof with a provider-specific auth rewrite
+   proof on a real endpoint.

@@ -775,8 +775,11 @@ async fn handle_tcp_connection(
             let tls_result = async {
                 let mut tls_client =
                     crate::l7::tls::tls_terminate_client(client, tls, &host_lc).await?;
+                // Rebuild upstream trust at connection time so a DPU MITM CA
+                // synced after supervisor startup is picked up without restart.
+                let upstream_config = crate::l7::tls::build_upstream_client_config();
                 let mut tls_upstream =
-                    crate::l7::tls::tls_connect_upstream(upstream, &host_lc, tls.upstream_config())
+                    crate::l7::tls::tls_connect_upstream(upstream, &host_lc, &upstream_config)
                         .await?;
 
                 if let Some(ref l7_config) = l7_config {
@@ -1035,10 +1038,11 @@ pub async fn handle_comch_tunnel(
             // Move `stream` by value — Join<...>: 'static satisfies tls_terminate_generic bound.
             match tls_terminate_generic(stream, tls.as_ref(), &host_lc).await {
                 Ok(mut tls_client) => {
+                    let upstream_config = crate::l7::tls::build_upstream_client_config();
                     match tls_connect_upstream_generic(
                         upstream,
                         &host_lc,
-                        tls.upstream_config(),
+                        &upstream_config,
                     )
                     .await
                     {

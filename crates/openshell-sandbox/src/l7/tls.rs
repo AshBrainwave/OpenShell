@@ -30,6 +30,15 @@ const SYSTEM_CA_PATHS: &[&str] = &[
     "/etc/ssl/cert.pem",                  // Alpine/macOS
 ];
 
+/// Extra CA locations managed by OpenShell inside the sandbox/supervisor pod.
+///
+/// These may be updated after the supervisor starts, for example when the DPU
+/// MITM CA is fetched and appended into the live trust bundle.
+const OPENSHELL_CA_PATHS: &[&str] = &[
+    "/etc/openshell-tls/ca-bundle.pem",
+    "/etc/openshell-tls/openshell-ca.pem",
+];
+
 /// Ephemeral CA certificate and key for MITM TLS termination.
 #[allow(clippy::struct_field_names)]
 pub struct SandboxCa {
@@ -238,6 +247,8 @@ where
 pub fn build_upstream_client_config() -> Arc<ClientConfig> {
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    load_pem_roots(&mut root_store, SYSTEM_CA_PATHS);
+    load_pem_roots(&mut root_store, OPENSHELL_CA_PATHS);
 
     let mut config = ClientConfig::builder()
         .with_root_certificates(root_store)
@@ -285,6 +296,21 @@ fn read_system_ca_bundle() -> String {
     // No system bundle found — combined file will contain only the sandbox CA.
     // This is acceptable since the proxy uses webpki-roots independently.
     String::new()
+}
+
+fn load_pem_roots(root_store: &mut rustls::RootCertStore, paths: &[&str]) {
+    for path in paths {
+        let path = Path::new(path);
+        if !path.exists() {
+            continue;
+        }
+        let Ok(certs) = parse_pem_certs(path) else {
+            continue;
+        };
+        for cert in certs {
+            let _ = root_store.add(cert);
+        }
+    }
 }
 
 /// Parse PEM certificates from a file into DER-encoded certificates.
