@@ -66,24 +66,77 @@ pub struct SecretResolver {
     by_placeholder: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CredentialOwner {
+    #[default]
+    Supervisor,
+    Dpu,
+}
+
+impl CredentialOwner {
+    pub(crate) const ENV_VAR: &'static str = "OPENSHELL_CREDENTIAL_OWNER";
+
+    pub(crate) fn from_env() -> Self {
+        match std::env::var(Self::ENV_VAR) {
+            Ok(value) => Self::from_str(&value).unwrap_or_else(|| {
+                tracing::warn!(
+                    env_var = Self::ENV_VAR,
+                    value = %value,
+                    "unknown credential owner, defaulting to supervisor"
+                );
+                Self::Supervisor
+            }),
+            Err(_) => Self::Supervisor,
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "supervisor" => Some(Self::Supervisor),
+            "dpu" => Some(Self::Dpu),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Supervisor => "supervisor",
+            Self::Dpu => "dpu",
+        }
+    }
+}
+
 impl SecretResolver {
     pub(crate) fn from_provider_env(
         provider_env: HashMap<String, String>,
+    ) -> (HashMap<String, String>, Option<Self>) {
+        Self::from_provider_env_with_owner(provider_env, CredentialOwner::Supervisor)
+    }
+
+    pub(crate) fn from_provider_env_with_owner(
+        provider_env: HashMap<String, String>,
+        owner: CredentialOwner,
     ) -> (HashMap<String, String>, Option<Self>) {
         if provider_env.is_empty() {
             return (HashMap::new(), None);
         }
 
         let mut child_env = HashMap::with_capacity(provider_env.len());
-        let mut by_placeholder = HashMap::with_capacity(provider_env.len());
+        let mut by_placeholder = match owner {
+            CredentialOwner::Supervisor => Some(HashMap::with_capacity(provider_env.len())),
+            CredentialOwner::Dpu => None,
+        };
 
         for (key, value) in provider_env {
             let placeholder = placeholder_for_env_key(&key);
             child_env.insert(key, placeholder.clone());
-            by_placeholder.insert(placeholder, value);
+            if let Some(map) = by_placeholder.as_mut() {
+                map.insert(placeholder, value);
+            }
         }
 
-        (child_env, Some(Self { by_placeholder }))
+        let resolver = by_placeholder.map(|by_placeholder| Self { by_placeholder });
+        (child_env, resolver)
     }
 
     /// Resolve a placeholder string to the real secret value.
@@ -719,6 +772,22 @@ mod tests {
                     .resolve_placeholder("openshell:resolve:env:ANTHROPIC_API_KEY")),
             Some("sk-test")
         );
+    }
+
+    #[test]
+    fn dpu_owner_keeps_placeholders_but_drops_local_resolver() {
+        let (child_env, resolver) = SecretResolver::from_provider_env_with_owner(
+            [("OPENAI_API_KEY".to_string(), "sk-test".to_string())]
+                .into_iter()
+                .collect(),
+            CredentialOwner::Dpu,
+        );
+
+        assert_eq!(
+            child_env.get("OPENAI_API_KEY"),
+            Some(&"openshell:resolve:env:OPENAI_API_KEY".to_string())
+        );
+        assert!(resolver.is_none());
     }
 
     #[test]

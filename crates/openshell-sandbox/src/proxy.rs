@@ -150,6 +150,7 @@ impl ProxyHandle {
         // policy doesn't specify an explicit address.
         let default_addr: SocketAddr = ([127, 0, 0, 1], 3128).into();
         let http_addr = bind_addr.or(policy.http_addr).unwrap_or(default_addr);
+        let upstream_http_proxy = policy.upstream_http_proxy;
 
         // Only enforce loopback restriction when not using network namespace override
         if bind_addr.is_none() && !http_addr.ip().is_loopback() {
@@ -175,6 +176,7 @@ impl ProxyHandle {
             loop {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
+                        info!(peer = %_addr, local = %local_addr, "Proxy accepted connection");
                         let opa = opa_engine.clone();
                         let cache = identity_cache.clone();
                         let spid = entrypoint_pid.clone();
@@ -184,10 +186,19 @@ impl ProxyHandle {
                         let dtx = denial_tx.clone();
                         tokio::spawn(async move {
                             if let Err(err) = handle_tcp_connection(
-                                stream, opa, cache, spid, tls, inf, resolver, dtx,
+                                stream,
+                                opa,
+                                cache,
+                                spid,
+                                tls,
+                                inf,
+                                resolver,
+                                dtx,
+                                upstream_http_proxy,
                             )
                             .await
                             {
+                                warn!(error = %err, "Proxy connection error");
                                 let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
                                     .activity(ActivityId::Fail)
                                     .severity(SeverityId::Low)
@@ -199,6 +210,7 @@ impl ProxyHandle {
                         });
                     }
                     Err(err) => {
+                        warn!(error = %err, "Proxy accept error");
                         let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
                             .activity(ActivityId::Fail)
                             .severity(SeverityId::Low)
@@ -297,6 +309,7 @@ async fn handle_tcp_connection(
     inference_ctx: Option<Arc<InferenceContext>>,
     secret_resolver: Option<Arc<SecretResolver>>,
     denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
+    upstream_http_proxy: Option<SocketAddr>,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_HEADER_BYTES];
     let mut used = 0usize;
@@ -325,6 +338,7 @@ async fn handle_tcp_connection(
     let request = String::from_utf8_lossy(&buf[..used]);
     let mut lines = request.split("\r\n");
     let request_line = lines.next().unwrap_or("");
+    info!(request_line = %request_line, bytes = used, "Proxy received request line");
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("");
@@ -341,12 +355,14 @@ async fn handle_tcp_connection(
             entrypoint_pid,
             secret_resolver,
             denial_tx.as_ref(),
+            upstream_http_proxy,
         )
         .await;
     }
 
     let (host, port) = parse_target(target)?;
     let host_lc = host.to_ascii_lowercase();
+    info!(host = %host_lc, port, "Proxy parsed CONNECT target");
 
     if host_lc == INFERENCE_LOCAL_HOST {
         respond(&mut client, b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
@@ -396,6 +412,7 @@ async fn handle_tcp_connection(
     })
     .await
     .map_err(|e| miette::miette!("identity resolution task panicked: {e}"))?;
+    info!(host = %host_lc, port, action = ?decision.action, "Proxy evaluated CONNECT policy");
 
     // Extract action string and matched policy for logging
     let (matched_policy, deny_reason) = match &decision.action {
@@ -484,10 +501,42 @@ async fn handle_tcp_connection(
         // Loopback and link-local are still always blocked.
         match parse_allowed_ips(&raw_allowed_ips) {
             Ok(nets) => match resolve_and_check_allowed_ips(&host, port, &nets).await {
-                Ok(addrs) => TcpStream::connect(addrs.as_slice())
-                    .await
-                    .into_diagnostic()?,
+                Ok(addrs) => match connect_target_stream(
+                    &host_lc,
+                    port,
+                    addrs.as_slice(),
+                    upstream_http_proxy,
+                )
+                .await
+                {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        warn!(host = %host_lc, port, error = %e, "Proxy upstream connect failed via allowlist path");
+                        let route = upstream_http_proxy
+                            .map(|addr| format!("upstream proxy {addr}"))
+                            .unwrap_or_else(|| "direct upstream".to_string());
+                        let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
+                            .activity(ActivityId::Fail)
+                            .severity(SeverityId::Low)
+                            .status(StatusId::Failure)
+                            .dst_endpoint(Endpoint::from_domain(&host_lc, port))
+                            .src_endpoint_addr(peer_addr.ip(), peer_addr.port())
+                            .actor_process(
+                                Process::from_bypass(&binary_str, &pid_str, &ancestors_str)
+                                    .with_cmd_line(&cmdline_str),
+                            )
+                            .firewall_rule(policy_str, "connect")
+                            .message(format!(
+                                "CONNECT upstream connect failed via {route} for {host_lc}:{port}: {e}"
+                            ))
+                            .build();
+                        ocsf_emit!(event);
+                        respond(&mut client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+                        return Ok(());
+                    }
+                },
                 Err(reason) => {
+                    warn!(host = %host_lc, port, reason = %reason, "Proxy SSRF/allowlist check blocked CONNECT");
                     {
                         let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
                             .activity(ActivityId::Open)
@@ -560,10 +609,42 @@ async fn handle_tcp_connection(
     } else {
         // Default: reject all internal IPs (loopback, RFC 1918, link-local).
         match resolve_and_reject_internal(&host, port).await {
-            Ok(addrs) => TcpStream::connect(addrs.as_slice())
-                .await
-                .into_diagnostic()?,
+            Ok(addrs) => match connect_target_stream(
+                &host_lc,
+                port,
+                addrs.as_slice(),
+                upstream_http_proxy,
+            )
+            .await
+            {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!(host = %host_lc, port, error = %e, "Proxy upstream connect failed");
+                    let route = upstream_http_proxy
+                        .map(|addr| format!("upstream proxy {addr}"))
+                        .unwrap_or_else(|| "direct upstream".to_string());
+                    let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
+                        .activity(ActivityId::Fail)
+                        .severity(SeverityId::Low)
+                        .status(StatusId::Failure)
+                        .dst_endpoint(Endpoint::from_domain(&host_lc, port))
+                        .src_endpoint_addr(peer_addr.ip(), peer_addr.port())
+                        .actor_process(
+                            Process::from_bypass(&binary_str, &pid_str, &ancestors_str)
+                                .with_cmd_line(&cmdline_str),
+                        )
+                        .firewall_rule(policy_str, "connect")
+                        .message(format!(
+                            "CONNECT upstream connect failed via {route} for {host_lc}:{port}: {e}"
+                        ))
+                        .build();
+                    ocsf_emit!(event);
+                    respond(&mut client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+                    return Ok(());
+                }
+            },
             Err(reason) => {
+                warn!(host = %host_lc, port, reason = %reason, "Proxy SSRF check blocked CONNECT");
                 {
                     let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
                         .activity(ActivityId::Open)
@@ -605,6 +686,7 @@ async fn handle_tcp_connection(
         dns_connect_start.elapsed().as_millis()
     );
 
+    info!(host = %host_lc, port, "Proxy sending 200 Connection Established");
     respond(&mut client, b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
 
     // Check if endpoint has L7 config for protocol-aware inspection
@@ -2233,6 +2315,7 @@ async fn handle_forward_proxy(
     entrypoint_pid: Arc<AtomicU32>,
     secret_resolver: Option<Arc<SecretResolver>>,
     denial_tx: Option<&mpsc::UnboundedSender<DenialEvent>>,
+    upstream_http_proxy: Option<SocketAddr>,
 ) -> Result<()> {
     // 1. Parse the absolute-form URI
     let (scheme, host, port, path) = match parse_proxy_uri(target_uri) {
@@ -2630,9 +2713,19 @@ async fn handle_forward_proxy(
     };
 
     // 6. Connect upstream
-    let mut upstream = match TcpStream::connect(addrs.as_slice()).await {
+    let mut upstream = match connect_target_stream(
+        &host_lc,
+        port,
+        addrs.as_slice(),
+        upstream_http_proxy,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
+            let route = upstream_http_proxy
+                .map(|addr| format!("upstream proxy {addr}"))
+                .unwrap_or_else(|| "direct upstream".to_string());
             let event = HttpActivityBuilder::new(crate::ocsf_ctx())
                 .activity(ActivityId::Fail)
                 .severity(SeverityId::Low)
@@ -2648,7 +2741,7 @@ async fn handle_forward_proxy(
                         .with_cmd_line(&cmdline_str),
                 )
                 .message(format!(
-                    "FORWARD upstream connect failed for {host_lc}:{port}: {e}"
+                    "FORWARD upstream connect failed via {route} for {host_lc}:{port}: {e}"
                 ))
                 .build();
             ocsf_emit!(event);
@@ -2703,6 +2796,71 @@ async fn handle_forward_proxy(
         .into_diagnostic()?;
 
     Ok(())
+}
+
+async fn connect_target_stream(
+    host: &str,
+    port: u16,
+    addrs: &[SocketAddr],
+    upstream_http_proxy: Option<SocketAddr>,
+) -> Result<TcpStream> {
+    if let Some(proxy_addr) = upstream_http_proxy {
+        connect_via_upstream_http_proxy(proxy_addr, host, port).await
+    } else {
+        TcpStream::connect(addrs).await.into_diagnostic()
+    }
+}
+
+async fn connect_via_upstream_http_proxy(
+    proxy_addr: SocketAddr,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream> {
+    let mut stream = TcpStream::connect(proxy_addr).await.into_diagnostic()?;
+    let connect_request = format!(
+        "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\nProxy-Connection: Keep-Alive\r\n\r\n"
+    );
+    stream
+        .write_all(connect_request.as_bytes())
+        .await
+        .into_diagnostic()?;
+
+    let mut buf = vec![0u8; MAX_HEADER_BYTES];
+    let mut used = 0usize;
+    loop {
+        if used == buf.len() {
+            return Err(miette::miette!(
+                "upstream proxy {proxy_addr} returned headers larger than {MAX_HEADER_BYTES} bytes"
+            ));
+        }
+
+        let n = stream.read(&mut buf[used..]).await.into_diagnostic()?;
+        if n == 0 {
+            return Err(miette::miette!(
+                "upstream proxy {proxy_addr} closed before CONNECT completed"
+            ));
+        }
+        used += n;
+
+        if buf[..used].windows(4).any(|win| win == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    let response = String::from_utf8_lossy(&buf[..used]);
+    let status_line = response.lines().next().unwrap_or("");
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok());
+
+    if status_code != Some(200) {
+        return Err(miette::miette!(
+            "upstream proxy {proxy_addr} CONNECT {host}:{port} failed: {status_line}"
+        ));
+    }
+
+    Ok(stream)
 }
 
 fn parse_target(target: &str) -> Result<(String, u16)> {

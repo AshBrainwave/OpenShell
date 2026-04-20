@@ -96,7 +96,7 @@ use crate::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
 use crate::proxy::ProxyHandle;
 #[cfg(target_os = "linux")]
 use crate::sandbox::linux::netns::NetworkNamespace;
-use crate::secrets::SecretResolver;
+use crate::secrets::{CredentialOwner, SecretResolver};
 pub use process::{ProcessHandle, ProcessStatus};
 
 /// Default interval (seconds) for re-fetching the inference route bundle from
@@ -225,6 +225,8 @@ pub async fn run_sandbox(
     // Explicit proxy listen address (e.g. 0.0.0.0:8080).
     // Bypasses loopback-only restriction. Required in DPU mode.
     listen_addr: Option<String>,
+    // Optional upstream HTTP proxy used by the supervisor as its next hop.
+    upstream_http_proxy: Option<String>,
 ) -> Result<i32> {
     let (program, args) = command
         .split_first()
@@ -258,7 +260,7 @@ pub async fn run_sandbox(
     // Load policy and initialize OPA engine
     let openshell_endpoint_for_proxy = openshell_endpoint.clone();
     let sandbox_name_for_agg = sandbox.clone();
-    let (policy, opa_engine) = if let Some(ref rest_url) = dpu_opa_url {
+    let (mut policy, opa_engine) = if let Some(ref rest_url) = dpu_opa_url {
         // DPU mode: create a minimal proxy policy and a REST-backed OPA engine.
         // No local policy files or gRPC are needed — the OPA daemon on the DPU
         // ARM handles all policy evaluation at 127.0.0.1:8181.
@@ -268,7 +270,10 @@ pub async fn run_sandbox(
             filesystem: crate::policy::FilesystemPolicy::default(),
             network: crate::policy::NetworkPolicy {
                 mode: crate::policy::NetworkMode::Proxy,
-                proxy: Some(crate::policy::ProxyPolicy { http_addr: None }),
+                proxy: Some(crate::policy::ProxyPolicy {
+                    http_addr: None,
+                    upstream_http_proxy: None,
+                }),
             },
             landlock: crate::policy::LandlockPolicy::default(),
             process: crate::policy::ProcessPolicy::default(),
@@ -285,6 +290,21 @@ pub async fn run_sandbox(
         )
         .await?
     };
+
+    if let Some(addr_str) = upstream_http_proxy {
+        let addr: SocketAddr = addr_str
+            .parse()
+            .map_err(|e| miette::miette!("Invalid --upstream-http-proxy address '{addr_str}': {e}"))?;
+        let proxy = policy
+            .network
+            .proxy
+            .get_or_insert(crate::policy::ProxyPolicy {
+                http_addr: None,
+                upstream_http_proxy: None,
+            });
+        proxy.upstream_http_proxy = Some(addr);
+        info!(upstream_http_proxy = %addr, "Supervisor proxy: configured upstream HTTP proxy");
+    }
 
     // Validate that the required "sandbox" user exists in this image.
     // Skipped in DPU mode — the proxy runs on the DPU ARM where no "sandbox"
@@ -357,7 +377,19 @@ pub async fn run_sandbox(
         std::collections::HashMap::new()
     };
 
-    let (provider_env, secret_resolver) = SecretResolver::from_provider_env(provider_env);
+    let credential_owner = CredentialOwner::from_env();
+    if matches!(credential_owner, CredentialOwner::Dpu) {
+        warn!(
+            env_var = CredentialOwner::ENV_VAR,
+            "credential owner is set to DPU; supervisor will keep placeholders only and will not hold a local SecretResolver. \
+             This is preparatory scaffolding: current managed-proxy CONNECT mode still requires additional DPU-side HTTP-aware rewrite work for HTTPS"
+        );
+    } else {
+        info!(credential_owner = credential_owner.as_str(), "Credential ownership mode");
+    }
+
+    let (provider_env, secret_resolver) =
+        SecretResolver::from_provider_env_with_owner(provider_env, credential_owner);
     let secret_resolver = secret_resolver.map(Arc::new);
 
     // Create identity cache for SHA256 TOFU when OPA is active
@@ -1013,7 +1045,10 @@ pub async fn run_dpu_proxy(
         .map_err(|e| miette::miette!("Invalid --listen address '{listen_addr}': {e}"))?;
     info!(addr = %bind_addr, "DPU proxy: starting");
 
-    let proxy_policy = crate::policy::ProxyPolicy { http_addr: None };
+    let proxy_policy = crate::policy::ProxyPolicy {
+        http_addr: None,
+        upstream_http_proxy: None,
+    };
     let _proxy = proxy::ProxyHandle::start_with_bind_addr(
         &proxy_policy,
         Some(bind_addr),
@@ -2054,7 +2089,10 @@ async fn load_policy(
             filesystem: config.filesystem,
             network: NetworkPolicy {
                 mode: NetworkMode::Proxy,
-                proxy: Some(ProxyPolicy { http_addr: None }),
+                proxy: Some(ProxyPolicy {
+                    http_addr: None,
+                    upstream_http_proxy: None,
+                }),
             },
             landlock: config.landlock,
             process: config.process,
