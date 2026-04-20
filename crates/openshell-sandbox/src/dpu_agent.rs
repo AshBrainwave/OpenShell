@@ -29,7 +29,8 @@ struct Args {
     #[arg(long, env = "OPENSHELL_SANDBOX_ID")]
     sandbox_id: String,
 
-    /// Output directory for the local OPA bundle, credentials, and state files.
+    /// Output directory for the local OPA bundle, credentials, OVS intent, and
+    /// state files.
     #[arg(
         long,
         default_value = "/var/lib/openshell-dpu",

@@ -1721,6 +1721,33 @@ Platform-specific code is abstracted through `crates/openshell-sandbox/src/sandb
 
 On non-Linux platforms, the sandbox can still run commands with proxy-based network filtering, but the kernel-level isolation (filesystem, syscall, namespace) and process-identity binding are unavailable.
 
+## BF3 Managed-Proxy DPU Agent Outputs
+
+The BF3 managed-proxy MVP reuses the same `GetSandboxSettings` / provider-environment pull pattern, but materializes a different runtime bundle on the DPU. `openshell-dpu-agent` in `crates/openshell-sandbox/src/dpu_control_agent.rs` writes four categories of files into its output directory:
+
+- `opa/policy.rego` and `opa/data.json` for the DPU-local OPA daemon that controls upstream destination allowlists for `openshell-dpu-proxy`
+- `credentials.json` for provider API credentials injected into the DPU proxy process
+- `state.json` for the applied sandbox revision metadata and compile warnings
+- `ovs-protected-path.json` for the coarse protected-path enforcement intent consumed by the BF3 demo launcher
+
+The OVS intent file exists because the protected-side MVP datapath is not owned by the standalone SF/VNF DOCA sample path. The guest-facing flow is:
+
+```text
+guest VF -> pf0vf0 representor -> ovsbr1 -> LOCAL(10.99.2.1:3128)
+```
+
+For that traffic shape, the DPU agent derives whether the protected proxy endpoint `10.99.2.1:3128` is present in the sandbox policy at all:
+
+- if the proxy endpoint is present, the intent action is `allow`
+- if the proxy endpoint is absent, the intent action is `drop`
+
+The emitted JSON names the OVS bridge (`ovsbr1`), representor (`pf0vf0`), destination IP/port (`10.99.2.1:3128`), transport (`tcp`), and override priority (`300`). The current BF3 launcher consumes that file and turns it into one of two outcomes:
+
+- `allow`: remove any stale priority-300 deny override and leave the baseline forwarding rule in place
+- `drop`: install a strict priority-300 `actions=drop` rule above the baseline `priority=210 ... actions=LOCAL` path
+
+This keeps the policy/control path on the gateway and DPU agent, while moving the coarse protected-path decision onto the OVS/representor surface that the BF3 MVP actually uses.
+
 ## Cross-References
 
 - [Overview](README.md) -- System-wide architecture context

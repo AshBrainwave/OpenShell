@@ -5,7 +5,8 @@
 //!
 //! The agent pulls effective sandbox policy and provider environment from the
 //! OpenShell server, compiles a DPU-local OPA bundle for destination-based
-//! enforcement, writes local runtime state, and reports policy load status.
+//! enforcement, emits protected-path OVS rule intent for the BF3 MVP, writes
+//! local runtime state, and reports policy load status.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -23,6 +24,12 @@ use tracing::{debug, info, warn};
 use crate::grpc_client::{CachedOpenShellClient, SettingsPollResult};
 
 const DPU_PROXY_POLICY: &str = include_str!("../data/dpu-proxy-policy.rego");
+const PROTECTED_PROXY_BRIDGE: &str = "ovsbr1";
+const PROTECTED_PROXY_VF_REP: &str = "pf0vf0";
+const PROTECTED_PROXY_IP: &str = "10.99.2.1";
+const PROTECTED_PROXY_PORT: u16 = 3128;
+const PROTECTED_PROXY_PRIORITY: u16 = 300;
+const PROTECTED_PROXY_PROTO: &str = "tcp";
 
 #[derive(Debug, Clone)]
 pub struct DpuControlAgentConfig {
@@ -45,6 +52,25 @@ struct DpuOpaData {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ProtectedPathAction {
+    Allow,
+    Drop,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProtectedPathRuleIntent {
+    bridge: String,
+    in_port_name: String,
+    proto: String,
+    dst_ip: String,
+    dst_port: u16,
+    priority: u16,
+    action: ProtectedPathAction,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct AppliedState {
     sandbox_id: String,
     version: u32,
@@ -57,6 +83,7 @@ struct AppliedState {
     ignored_binary_rules: usize,
     skipped_hostless_endpoints: usize,
     skipped_invalid_ports: usize,
+    protected_proxy_action: String,
     warnings: Vec<String>,
 }
 
@@ -66,6 +93,7 @@ struct CompiledPolicy {
     ignored_binary_rules: usize,
     skipped_hostless_endpoints: usize,
     skipped_invalid_ports: usize,
+    protected_proxy_allowed: bool,
     warnings: Vec<String>,
 }
 
@@ -76,6 +104,7 @@ struct RuntimePaths {
     opa_policy: PathBuf,
     opa_data: PathBuf,
     credentials: PathBuf,
+    ovs_protected_path: PathBuf,
     state: PathBuf,
 }
 
@@ -86,6 +115,7 @@ impl RuntimePaths {
             opa_policy: opa_dir.join("policy.rego"),
             opa_data: opa_dir.join("data.json"),
             credentials: base.join("credentials.json"),
+            ovs_protected_path: base.join("ovs-protected-path.json"),
             state: base.join("state.json"),
             base,
             opa_dir,
@@ -254,6 +284,7 @@ fn apply_runtime_files(
     paths: &RuntimePaths,
 ) -> Result<AppliedState> {
     let compiled = compile_dpu_policy(settings.policy.as_ref());
+    let protected_path = build_protected_path_rule_intent(&compiled);
     let state = AppliedState {
         sandbox_id: sandbox_id.to_string(),
         version: settings.version,
@@ -266,12 +297,14 @@ fn apply_runtime_files(
         ignored_binary_rules: compiled.ignored_binary_rules,
         skipped_hostless_endpoints: compiled.skipped_hostless_endpoints,
         skipped_invalid_ports: compiled.skipped_invalid_ports,
+        protected_proxy_action: protected_path.action.as_str().to_string(),
         warnings: compiled.warnings.clone(),
     };
 
     write_string_atomic(&paths.opa_policy, DPU_PROXY_POLICY, 0o644)?;
     write_json_atomic(&paths.opa_data, &compiled.data, 0o644)?;
     write_json_atomic(&paths.credentials, provider_env, 0o600)?;
+    write_json_atomic(&paths.ovs_protected_path, &protected_path, 0o644)?;
     write_json_atomic(&paths.state, &state, 0o600)?;
 
     Ok(state)
@@ -296,6 +329,7 @@ fn compile_dpu_policy(policy: Option<&ProtoSandboxPolicy>) -> CompiledPolicy {
             ignored_binary_rules: 0,
             skipped_hostless_endpoints: 0,
             skipped_invalid_ports: 0,
+            protected_proxy_allowed: false,
             warnings: vec![
                 "No sandbox policy returned; DPU proxy policy compiled as deny-all".to_string(),
             ],
@@ -375,7 +409,21 @@ fn compile_dpu_policy(policy: Option<&ProtoSandboxPolicy>) -> CompiledPolicy {
             host,
             ports: ports.into_iter().collect(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let protected_proxy_allowed = allowed_destinations.iter().any(|destination| {
+        destination.host == PROTECTED_PROXY_IP
+            && destination.ports.contains(&PROTECTED_PROXY_PORT)
+    });
+
+    if !protected_proxy_allowed {
+        warnings.insert(format!(
+            "Protected proxy endpoint {}:{} is absent from the sandbox policy; the DPU protected path will be blocked on {} via {}",
+            PROTECTED_PROXY_IP,
+            PROTECTED_PROXY_PORT,
+            PROTECTED_PROXY_BRIDGE,
+            PROTECTED_PROXY_VF_REP,
+        ));
+    }
 
     CompiledPolicy {
         data: DpuOpaData {
@@ -384,7 +432,42 @@ fn compile_dpu_policy(policy: Option<&ProtoSandboxPolicy>) -> CompiledPolicy {
         ignored_binary_rules,
         skipped_hostless_endpoints,
         skipped_invalid_ports,
+        protected_proxy_allowed,
         warnings: warnings.into_iter().collect(),
+    }
+}
+
+fn build_protected_path_rule_intent(compiled: &CompiledPolicy) -> ProtectedPathRuleIntent {
+    let (action, reason) = if compiled.protected_proxy_allowed {
+        (
+            ProtectedPathAction::Allow,
+            format!(
+                "Protected proxy endpoint {}:{} is present in the sandbox policy; remove any high-priority deny override and leave the baseline forwarding path on {} in place",
+                PROTECTED_PROXY_IP, PROTECTED_PROXY_PORT, PROTECTED_PROXY_BRIDGE
+            ),
+        )
+    } else {
+        (
+            ProtectedPathAction::Drop,
+            format!(
+                "Protected proxy endpoint {}:{} is absent from the sandbox policy; install a high-priority deny override on {} ingress {}",
+                PROTECTED_PROXY_IP,
+                PROTECTED_PROXY_PORT,
+                PROTECTED_PROXY_BRIDGE,
+                PROTECTED_PROXY_VF_REP,
+            ),
+        )
+    };
+
+    ProtectedPathRuleIntent {
+        bridge: PROTECTED_PROXY_BRIDGE.to_string(),
+        in_port_name: PROTECTED_PROXY_VF_REP.to_string(),
+        proto: PROTECTED_PROXY_PROTO.to_string(),
+        dst_ip: PROTECTED_PROXY_IP.to_string(),
+        dst_port: PROTECTED_PROXY_PORT,
+        priority: PROTECTED_PROXY_PRIORITY,
+        action,
+        reason,
     }
 }
 
@@ -406,6 +489,15 @@ fn policy_source_name(source: PolicySource) -> String {
         PolicySource::Sandbox => "sandbox".to_string(),
         PolicySource::Global => "global".to_string(),
         PolicySource::Unspecified => "unspecified".to_string(),
+    }
+}
+
+impl ProtectedPathAction {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Drop => "drop",
+        }
     }
 }
 
@@ -546,5 +638,51 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("ignores binary matching")));
+    }
+
+    #[test]
+    fn compile_policy_marks_protected_proxy_allowed_when_present() {
+        let mut policy = SandboxPolicy::default();
+        policy.network_policies.insert(
+            "dpu_proxy".to_string(),
+            NetworkPolicyRule {
+                name: "dpu_proxy".to_string(),
+                endpoints: vec![endpoint(PROTECTED_PROXY_IP, &[PROTECTED_PROXY_PORT.into()])],
+                binaries: Vec::new(),
+            },
+        );
+
+        let compiled = compile_dpu_policy(Some(&policy));
+        let intent = build_protected_path_rule_intent(&compiled);
+
+        assert!(compiled.protected_proxy_allowed);
+        assert_eq!(intent.action, ProtectedPathAction::Allow);
+        assert_eq!(intent.bridge, PROTECTED_PROXY_BRIDGE);
+        assert_eq!(intent.in_port_name, PROTECTED_PROXY_VF_REP);
+        assert_eq!(intent.dst_ip, PROTECTED_PROXY_IP);
+        assert_eq!(intent.dst_port, PROTECTED_PROXY_PORT);
+    }
+
+    #[test]
+    fn compile_policy_blocks_protected_proxy_when_absent() {
+        let mut policy = SandboxPolicy::default();
+        policy.network_policies.insert(
+            "upstream".to_string(),
+            NetworkPolicyRule {
+                name: "upstream".to_string(),
+                endpoints: vec![endpoint("api.openai.com", &[443])],
+                binaries: Vec::new(),
+            },
+        );
+
+        let compiled = compile_dpu_policy(Some(&policy));
+        let intent = build_protected_path_rule_intent(&compiled);
+
+        assert!(!compiled.protected_proxy_allowed);
+        assert_eq!(intent.action, ProtectedPathAction::Drop);
+        assert!(compiled
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Protected proxy endpoint")));
     }
 }
