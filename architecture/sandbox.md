@@ -1748,6 +1748,11 @@ The emitted JSON names the OVS bridge (`ovsbr1`), representor (`pf0vf0`), destin
 
 This keeps the policy/control path on the gateway and DPU agent, while moving the coarse protected-path decision onto the OVS/representor surface that the BF3 MVP actually uses.
 
+The adjacent L7 question is different: coarse drop/allow belongs on the
+OVS/representor surface, but TLS termination and auth-header insertion belong
+in `openshell-dpu-proxy`, not pure DOCA Flow. See
+[BF3 L7 Auth Insertion and DOCA Boundaries](bf3-l7-auth-insertion.md).
+
 ## Cross-References
 
 - [Overview](README.md) -- System-wide architecture context
@@ -1757,3 +1762,4 @@ This keeps the policy/control path on the gateway and DPU agent, while moving th
 - [Providers](sandbox-providers.md) -- Provider credential injection
 - [Policy Language](security-policy.md) -- Rego policy syntax and rules
 - [Inference Routing](inference-routing.md) -- Inference interception, route management, and the `openshell-router` crate
+- [BF3 L7 Auth Insertion and DOCA Boundaries](bf3-l7-auth-insertion.md) -- Where OVS/DOCA stops and DPU-side HTTP rewrite begins
