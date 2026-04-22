@@ -11,6 +11,12 @@ allow if {
 	port_matches(dest, input.destination_port)
 }
 
+matched_endpoint_config := dest if {
+	some dest in data.allowed_destinations
+	host_matches(dest, lower(input.destination_host))
+	port_matches(dest, input.destination_port)
+}
+
 host_matches(dest, host) if {
 	not contains(dest.host, "*")
 	lower(dest.host) == host

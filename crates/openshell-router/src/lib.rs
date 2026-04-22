@@ -12,6 +12,8 @@ pub use backend::{
 use config::{ResolvedRoute, RouterConfig};
 use tracing::info;
 
+const UPSTREAM_HTTP_PROXY_ENV: &str = "OPENSHELL_UPSTREAM_HTTP_PROXY";
+
 #[derive(Debug, thiserror::Error)]
 pub enum RouterError {
     #[error("route not found for route '{0}'")]
@@ -36,9 +38,7 @@ pub struct Router {
 
 impl Router {
     pub fn new() -> Result<Self, RouterError> {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| RouterError::Internal(format!("failed to build HTTP client: {e}")))?;
+        let client = build_http_client()?;
         Ok(Self {
             routes: Vec::new(),
             client,
@@ -142,6 +142,63 @@ impl Router {
     }
 }
 
+fn build_http_client() -> Result<reqwest::Client, RouterError> {
+    let mut builder = reqwest::Client::builder();
+
+    if let Some(proxy_url) = upstream_https_proxy_url_from_env()? {
+        info!(
+            upstream_http_proxy = %proxy_url,
+            "router configured HTTPS upstream proxy"
+        );
+        let proxy = reqwest::Proxy::https(&proxy_url).map_err(|e| {
+            RouterError::Internal(format!(
+                "failed to configure HTTPS upstream proxy from {UPSTREAM_HTTP_PROXY_ENV}: {e}"
+            ))
+        })?;
+        builder = builder.proxy(proxy);
+    }
+
+    builder
+        .build()
+        .map_err(|e| RouterError::Internal(format!("failed to build HTTP client: {e}")))
+}
+
+fn upstream_https_proxy_url_from_env() -> Result<Option<String>, RouterError> {
+    match std::env::var(UPSTREAM_HTTP_PROXY_ENV) {
+        Ok(raw) => normalize_upstream_proxy_url(&raw),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(RouterError::Internal(format!(
+            "{UPSTREAM_HTTP_PROXY_ENV} contains invalid unicode"
+        ))),
+    }
+}
+
+fn normalize_upstream_proxy_url(raw: &str) -> Result<Option<String>, RouterError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let candidate = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+
+    let parsed = reqwest::Url::parse(&candidate).map_err(|e| {
+        RouterError::Internal(format!(
+            "invalid {UPSTREAM_HTTP_PROXY_ENV} value '{trimmed}': {e}"
+        ))
+    })?;
+
+    match parsed.scheme() {
+        "http" | "https" => Ok(Some(parsed.to_string())),
+        other => Err(RouterError::Internal(format!(
+            "unsupported {UPSTREAM_HTTP_PROXY_ENV} scheme '{other}'"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +240,28 @@ mod tests {
         };
         let err = Router::from_config(&config).unwrap_err();
         assert!(matches!(err, RouterError::Internal(_)));
+    }
+
+    #[test]
+    fn normalize_upstream_proxy_url_adds_http_scheme() {
+        let proxy = normalize_upstream_proxy_url("10.99.2.1:3128")
+            .unwrap()
+            .expect("proxy url");
+        assert_eq!(proxy, "http://10.99.2.1:3128/");
+    }
+
+    #[test]
+    fn normalize_upstream_proxy_url_preserves_scheme() {
+        let proxy = normalize_upstream_proxy_url("https://proxy.example:8443")
+            .unwrap()
+            .expect("proxy url");
+        assert_eq!(proxy, "https://proxy.example:8443/");
+    }
+
+    #[test]
+    fn normalize_upstream_proxy_url_rejects_bad_scheme() {
+        let err = normalize_upstream_proxy_url("socks5://proxy.example:1080").unwrap_err();
+        assert!(matches!(err, RouterError::Internal(_)));
+        assert!(err.to_string().contains("unsupported"));
     }
 }

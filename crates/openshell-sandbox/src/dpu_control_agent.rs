@@ -44,6 +44,8 @@ pub struct DpuControlAgentConfig {
 struct AllowedDestination {
     host: String,
     ports: Vec<u16>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    allowed_ips: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -95,6 +97,12 @@ struct CompiledPolicy {
     skipped_invalid_ports: usize,
     protected_proxy_allowed: bool,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct CompiledDestinationAccumulator {
+    ports: BTreeSet<u16>,
+    allowed_ips: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,7 +344,7 @@ fn compile_dpu_policy(policy: Option<&ProtoSandboxPolicy>) -> CompiledPolicy {
         };
     };
 
-    let mut destinations: BTreeMap<String, BTreeSet<u16>> = BTreeMap::new();
+    let mut destinations: BTreeMap<String, CompiledDestinationAccumulator> = BTreeMap::new();
     let mut warnings = BTreeSet::new();
     let mut ignored_binary_rules = 0usize;
     let mut skipped_hostless_endpoints = 0usize;
@@ -358,12 +366,6 @@ fn compile_dpu_policy(policy: Option<&ProtoSandboxPolicy>) -> CompiledPolicy {
                     "Skipped hostless endpoint in policy '{policy_key}' because the DPU proxy MVP matches explicit destination hosts only"
                 ));
                 continue;
-            }
-
-            if !endpoint.allowed_ips.is_empty() {
-                warnings.insert(format!(
-                    "Policy '{policy_key}' endpoint '{host}' uses allowed_ips; DPU proxy MVP ignores IP allowlists and matches host+port only"
-                ));
             }
 
             let mut normalized_ports = BTreeSet::new();
@@ -396,18 +398,20 @@ fn compile_dpu_policy(policy: Option<&ProtoSandboxPolicy>) -> CompiledPolicy {
                 continue;
             }
 
-            destinations
-                .entry(host.to_string())
-                .or_default()
-                .extend(normalized_ports);
+            let destination = destinations.entry(host.to_string()).or_default();
+            destination.ports.extend(normalized_ports);
+            destination
+                .allowed_ips
+                .extend(endpoint.allowed_ips.iter().cloned());
         }
     }
 
     let allowed_destinations = destinations
         .into_iter()
-        .map(|(host, ports)| AllowedDestination {
+        .map(|(host, destination)| AllowedDestination {
             host,
-            ports: ports.into_iter().collect(),
+            ports: destination.ports.into_iter().collect(),
+            allowed_ips: destination.allowed_ips.into_iter().collect(),
         })
         .collect::<Vec<_>>();
     let protected_proxy_allowed = allowed_destinations.iter().any(|destination| {
@@ -542,6 +546,7 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 mod tests {
     use super::*;
     use openshell_core::proto::{NetworkEndpoint, NetworkPolicyRule, SandboxPolicy};
+    use regorus::Value;
 
     fn endpoint(host: &str, ports: &[u32]) -> NetworkEndpoint {
         NetworkEndpoint {
@@ -579,6 +584,7 @@ mod tests {
             vec![AllowedDestination {
                 host: "api.openai.com".to_string(),
                 ports: vec![443, 8443],
+                allowed_ips: Vec::new(),
             }]
         );
         assert!(compiled.warnings.is_empty());
@@ -641,6 +647,53 @@ mod tests {
     }
 
     #[test]
+    fn compile_policy_preserves_allowed_ips_union_per_host() {
+        let mut policy = SandboxPolicy::default();
+        policy.network_policies.insert(
+            "nvidia".to_string(),
+            NetworkPolicyRule {
+                name: "nvidia".to_string(),
+                endpoints: vec![
+                    NetworkEndpoint {
+                        host: "inference-api.nvidia.com".to_string(),
+                        port: 0,
+                        protocol: String::new(),
+                        tls: String::new(),
+                        enforcement: String::new(),
+                        access: String::new(),
+                        rules: Vec::new(),
+                        allowed_ips: vec!["10.48.202.0/24".to_string()],
+                        ports: vec![443],
+                    },
+                    NetworkEndpoint {
+                        host: "inference-api.nvidia.com".to_string(),
+                        port: 0,
+                        protocol: String::new(),
+                        tls: String::new(),
+                        enforcement: String::new(),
+                        access: String::new(),
+                        rules: Vec::new(),
+                        allowed_ips: vec!["10.48.203.0/24".to_string()],
+                        ports: vec![443],
+                    },
+                ],
+                binaries: Vec::new(),
+            },
+        );
+
+        let compiled = compile_dpu_policy(Some(&policy));
+
+        assert_eq!(
+            compiled.data.allowed_destinations,
+            vec![AllowedDestination {
+                host: "inference-api.nvidia.com".to_string(),
+                ports: vec![443],
+                allowed_ips: vec!["10.48.202.0/24".to_string(), "10.48.203.0/24".to_string()],
+            }]
+        );
+    }
+
+    #[test]
     fn compile_policy_marks_protected_proxy_allowed_when_present() {
         let mut policy = SandboxPolicy::default();
         policy.network_policies.insert(
@@ -684,5 +737,68 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("Protected proxy endpoint")));
+    }
+
+    #[test]
+    fn dpu_policy_rego_exposes_matched_endpoint_config_with_allowed_ips() {
+        let mut policy = SandboxPolicy::default();
+        policy.network_policies.insert(
+            "nvidia".to_string(),
+            NetworkPolicyRule {
+                name: "nvidia".to_string(),
+                endpoints: vec![NetworkEndpoint {
+                    host: "inference-api.nvidia.com".to_string(),
+                    port: 0,
+                    protocol: String::new(),
+                    tls: String::new(),
+                    enforcement: String::new(),
+                    access: String::new(),
+                    rules: Vec::new(),
+                    allowed_ips: vec!["10.48.202.0/24".to_string()],
+                    ports: vec![443],
+                }],
+                binaries: Vec::new(),
+            },
+        );
+
+        let compiled = compile_dpu_policy(Some(&policy));
+        let mut engine = regorus::Engine::new();
+        engine
+            .add_policy("policy.rego".into(), DPU_PROXY_POLICY.into())
+            .unwrap();
+        engine
+            .add_data_json(&serde_json::to_string(&compiled.data).unwrap())
+            .unwrap();
+        engine
+            .set_input_json(
+                &serde_json::json!({
+                    "destination_host": "inference-api.nvidia.com",
+                    "destination_port": 443,
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+        let allowed = engine.eval_rule("data.openshell.allow".into()).unwrap();
+        assert_eq!(allowed, Value::from(true));
+
+        let endpoint = engine
+            .eval_rule("data.openshell.matched_endpoint_config".into())
+            .unwrap();
+        let allowed_ips = match endpoint {
+            Value::Object(map) => match map.get(&Value::from("allowed_ips")) {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|item| match item {
+                        Value::String(value) => value.to_string(),
+                        other => panic!("unexpected allowed_ips item: {other:?}"),
+                    })
+                    .collect::<Vec<_>>(),
+                other => panic!("unexpected allowed_ips field: {other:?}"),
+            },
+            other => panic!("unexpected endpoint config: {other:?}"),
+        };
+
+        assert_eq!(allowed_ips, vec!["10.48.202.0/24".to_string()]);
     }
 }

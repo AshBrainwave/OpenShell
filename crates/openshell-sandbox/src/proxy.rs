@@ -775,12 +775,22 @@ async fn handle_tcp_connection(
             let tls_result = async {
                 let mut tls_client =
                     crate::l7::tls::tls_terminate_client(client, tls, &host_lc).await?;
+                info!(
+                    host = %host_lc,
+                    port = port,
+                    "TLS terminated successfully for client connection"
+                );
                 // Rebuild upstream trust at connection time so a DPU MITM CA
                 // synced after supervisor startup is picked up without restart.
                 let upstream_config = crate::l7::tls::build_upstream_client_config();
                 let mut tls_upstream =
                     crate::l7::tls::tls_connect_upstream(upstream, &host_lc, &upstream_config)
                         .await?;
+                info!(
+                    host = %host_lc,
+                    port = port,
+                    "Upstream TLS connection established"
+                );
 
                 if let Some(ref l7_config) = l7_config {
                     // L7 inspection on terminated TLS traffic.
@@ -817,11 +827,11 @@ async fn handle_tcp_connection(
             };
             if let Err(e) = tls_result.await {
                 if is_benign_relay_error(&e) {
-                    debug!(
+                    info!(
                         host = %host_lc,
                         port = port,
                         error = %e,
-                        "TLS connection closed"
+                        "TLS connection closed (benign relay error)"
                     );
                 } else {
                     let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
@@ -2045,12 +2055,10 @@ fn query_allowed_ips(
     host: &str,
     port: u16,
 ) -> Vec<String> {
-    // Only query if action is Allow with a matched policy
-    let has_policy = match &decision.action {
-        NetworkAction::Allow { matched_policy } => matched_policy.is_some(),
-        _ => false,
-    };
-    if !has_policy {
+    // Query on any Allow action. In DPU REST mode the OPA allow result does not
+    // currently populate `matched_policy`, but the matched endpoint config may
+    // still be available and carry `allowed_ips`.
+    if !matches!(decision.action, NetworkAction::Allow { .. }) {
         return vec![];
     }
 

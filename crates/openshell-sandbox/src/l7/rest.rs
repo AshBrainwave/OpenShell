@@ -274,30 +274,53 @@ where
     let rewrite_result = rewrite_http_header_block(&req.raw_header[..header_end], resolver)
         .map_err(|e| miette!("credential injection failed: {e}"))?;
 
-    upstream
-        .write_all(&rewrite_result.rewritten)
-        .await
-        .into_diagnostic()?;
-
     let overflow = &req.raw_header[header_end..];
-    if !overflow.is_empty() {
-        upstream.write_all(overflow).await.into_diagnostic()?;
-    }
     let overflow_len = overflow.len() as u64;
 
-    match req.body_length {
-        BodyLength::ContentLength(len) => {
-            let remaining = len.saturating_sub(overflow_len);
-            if remaining > 0 {
-                relay_fixed(client, upstream, remaining).await?;
+    let forward_result: Result<()> = async {
+        upstream
+            .write_all(&rewrite_result.rewritten)
+            .await
+            .into_diagnostic()?;
+
+        if !overflow.is_empty() {
+            upstream.write_all(overflow).await.into_diagnostic()?;
+        }
+
+        match req.body_length {
+            BodyLength::ContentLength(len) => {
+                let remaining = len.saturating_sub(overflow_len);
+                if remaining > 0 {
+                    relay_fixed(client, upstream, remaining).await?;
+                }
             }
+            BodyLength::Chunked => {
+                relay_chunked(client, upstream, &req.raw_header[header_end..]).await?;
+            }
+            BodyLength::None => {}
         }
-        BodyLength::Chunked => {
-            relay_chunked(client, upstream, &req.raw_header[header_end..]).await?;
-        }
-        BodyLength::None => {}
+        upstream.flush().await.into_diagnostic()?;
+        Ok(())
     }
-    upstream.flush().await.into_diagnostic()?;
+    .await;
+
+    if let Err(error) = forward_result {
+        warn!(
+            method = %req.action,
+            target = %req.target,
+            error = %error,
+            "failed while forwarding request upstream"
+        );
+        let response = b"HTTP/1.1 502 Bad Gateway\r\n\
+Content-Type: application/json\r\n\
+Content-Length: 85\r\n\
+Connection: close\r\n\
+\r\n\
+{\"error\":\"upstream_write_failed\",\"detail\":\"failed while forwarding request upstream\"}";
+        client.write_all(response).await.into_diagnostic()?;
+        client.flush().await.into_diagnostic()?;
+        return Ok(RelayOutcome::Consumed);
+    }
 
     let outcome = relay_response(&req.action, upstream, client).await?;
 
@@ -610,9 +633,53 @@ where
             return Err(miette!("HTTP response headers exceed limit"));
         }
 
-        let n = upstream.read(&mut tmp).await.into_diagnostic()?;
+        let n = match upstream.read(&mut tmp).await {
+            Ok(n) => n,
+            Err(e) => {
+                // Surface a concrete HTTP error when the upstream connection
+                // resets before any response headers arrive. Otherwise curl
+                // reports only "Empty reply from server", which hides the real
+                // failure mode in the DPU relay path.
+                if buf.is_empty() {
+                    warn!(
+                        request_method,
+                        error = %e,
+                        "upstream read failed before response headers"
+                    );
+                    let response = b"HTTP/1.1 502 Bad Gateway\r\n\
+Content-Type: application/json\r\n\
+Content-Length: 86\r\n\
+Connection: close\r\n\
+\r\n\
+{\"error\":\"upstream_read_failed\",\"detail\":\"upstream connection failed before response\"}";
+                    client.write_all(response).await.into_diagnostic()?;
+                    client.flush().await.into_diagnostic()?;
+                    return Ok(RelayOutcome::Consumed);
+                }
+                return Err(miette!("{e}"));
+            }
+        };
         if n == 0 {
-            // Upstream closed — forward whatever we have
+            // Upstream closed before sending any response headers. Surface this
+            // to the caller as a concrete 502 instead of silently consuming the
+            // request, which otherwise shows up to curl as "Empty reply from server".
+            if buf.is_empty() {
+                warn!(
+                    request_method,
+                    "upstream closed before sending response headers"
+                );
+                let response = b"HTTP/1.1 502 Bad Gateway\r\n\
+Content-Type: application/json\r\n\
+Content-Length: 70\r\n\
+Connection: close\r\n\
+\r\n\
+{\"error\":\"upstream_closed\",\"detail\":\"upstream closed before response\"}";
+                client.write_all(response).await.into_diagnostic()?;
+                client.flush().await.into_diagnostic()?;
+                return Ok(RelayOutcome::Consumed);
+            }
+
+            // Upstream closed after sending some bytes — forward whatever we have.
             if !buf.is_empty() {
                 client.write_all(&buf).await.into_diagnostic()?;
             }

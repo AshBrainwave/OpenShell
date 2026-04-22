@@ -427,10 +427,8 @@ impl OpaEngine {
     /// to get the full endpoint object for the matched policy. Returns the raw
     /// `regorus::Value` which can be parsed by `l7::parse_l7_config()`.
     pub fn query_endpoint_config(&self, input: &NetworkInput) -> Result<Option<regorus::Value>> {
-        // In REST mode, L7 endpoint config is not available; return None so
-        // the proxy falls back to default SSRF protection without L7 inspection.
-        if matches!(self.inner, OpaInner::Rest(_)) {
-            return Ok(None);
+        if let OpaInner::Rest(url) = &self.inner {
+            return query_endpoint_config_via_rest(url, input);
         }
 
         let OpaInner::Local(engine_mutex) = &self.inner else {
@@ -517,13 +515,51 @@ impl OpaEngine {
 ///
 /// Called from `spawn_blocking` — synchronous HTTP is intentional.
 fn evaluate_via_rest(url: &str, input: &NetworkInput) -> Result<NetworkAction> {
+    let resp_json = query_rest_rule_json(url, "allow", input)?;
+
+    match resp_json.get("result").and_then(|v| v.as_bool()) {
+        Some(true) => Ok(NetworkAction::Allow {
+            matched_policy: None,
+        }),
+        Some(false) => Ok(NetworkAction::Deny {
+            reason: "denied by DPU OPA policy".to_string(),
+        }),
+        None => Ok(NetworkAction::Deny {
+            reason: format!("OPA REST: unexpected response: {resp_json}"),
+        }),
+    }
+}
+
+fn query_endpoint_config_via_rest(
+    url: &str,
+    input: &NetworkInput,
+) -> Result<Option<regorus::Value>> {
+    let resp_json = query_rest_rule_json(url, "matched_endpoint_config", input)?;
+    let Some(result) = resp_json.get("result") else {
+        return Ok(None);
+    };
+
+    if result.is_null() {
+        return Ok(None);
+    }
+
+    regorus::Value::from_json_str(&result.to_string())
+        .map(Some)
+        .map_err(|e| miette::miette!("OPA REST endpoint config parse failed: {e}"))
+}
+
+fn query_rest_rule_json(
+    url: &str,
+    rule: &str,
+    input: &NetworkInput,
+) -> Result<serde_json::Value> {
     let input_doc = serde_json::json!({
         "binary_path": input.binary_path.to_string_lossy(),
         "destination_host": input.host,
         "destination_port": input.port,
     });
     let body = serde_json::json!({ "input": input_doc }).to_string();
-    let endpoint = format!("{}/v1/data/openshell/allow", url.trim_end_matches('/'));
+    let endpoint = format!("{}/v1/data/openshell/{rule}", url.trim_end_matches('/'));
 
     let response = ureq::post(&endpoint)
         .set("Content-Type", "application/json")
@@ -534,23 +570,8 @@ fn evaluate_via_rest(url: &str, input: &NetworkInput) -> Result<NetworkAction> {
         .into_string()
         .map_err(|e| miette::miette!("OPA REST response read failed: {e}"))?;
 
-    let resp_json: serde_json::Value = serde_json::from_str(&resp_str)
-        .map_err(|e| miette::miette!("OPA REST response parse failed: {e}"))?;
-
-    match resp_json.get("result").and_then(|v| v.as_bool()) {
-        Some(true) => Ok(NetworkAction::Allow {
-            matched_policy: None,
-        }),
-        Some(false) => Ok(NetworkAction::Deny {
-            reason: "denied by DPU OPA policy".to_string(),
-        }),
-        None => Ok(NetworkAction::Deny {
-            reason: format!(
-                "OPA REST: unexpected response: {:.80}",
-                resp_str
-            ),
-        }),
-    }
+    serde_json::from_str(&resp_str)
+        .map_err(|e| miette::miette!("OPA REST response parse failed: {e}"))
 }
 
 /// Convert a `regorus::Value` to a string, handling various types.

@@ -417,6 +417,16 @@ where
         // Log for observability via OCSF HTTP Activity event.
         // Uses redacted_target (path only, no query params) to avoid logging secrets.
         let has_creds = resolver.is_some();
+        info!(
+            host = %ctx.host,
+            port = ctx.port,
+            method = %req.action,
+            target = %redacted_target,
+            body_length = ?req.body_length,
+            credentials_rewriter = has_creds,
+            request_num = request_count,
+            "relay_passthrough_with_credentials: parsed request"
+        );
         {
             let event = HttpActivityBuilder::new(crate::ocsf_ctx())
                 .activity(ActivityId::Other)
@@ -440,8 +450,33 @@ where
         // relay_http_request_with_resolver handles both directions: it sends
         // the request upstream and reads the response back to the client.
         let outcome =
-            crate::l7::rest::relay_http_request_with_resolver(&req, client, upstream, resolver)
-                .await?;
+            match crate::l7::rest::relay_http_request_with_resolver(&req, client, upstream, resolver)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    warn!(
+                        host = %ctx.host,
+                        port = ctx.port,
+                        method = %req.action,
+                        target = %redacted_target,
+                        request_num = request_count,
+                        error = %error,
+                        "relay_passthrough_with_credentials: relay failed"
+                    );
+                    return Err(error);
+                }
+            };
+
+        info!(
+            host = %ctx.host,
+            port = ctx.port,
+            method = %req.action,
+            target = %redacted_target,
+            request_num = request_count,
+            outcome = ?outcome,
+            "relay_passthrough_with_credentials: relay completed"
+        );
 
         match outcome {
             RelayOutcome::Reusable => {} // continue loop
