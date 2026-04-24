@@ -10,9 +10,16 @@ pub use backend::{
     ValidationFailureKind, verify_backend_endpoint,
 };
 use config::{ResolvedRoute, RouterConfig};
+use std::{
+    fs::File,
+    io::BufReader,
+    path::{Path, PathBuf},
+};
 use tracing::info;
 
 const UPSTREAM_HTTP_PROXY_ENV: &str = "OPENSHELL_UPSTREAM_HTTP_PROXY";
+const CUSTOM_ROOT_CA_PATHS: &[&str] =
+    &["/etc/openshell-tls/openshell-ca.pem", "/tmp/openshell-dpu-ca.crt"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum RouterError {
@@ -33,16 +40,11 @@ pub enum RouterError {
 #[derive(Debug)]
 pub struct Router {
     routes: Vec<ResolvedRoute>,
-    client: reqwest::Client,
 }
 
 impl Router {
     pub fn new() -> Result<Self, RouterError> {
-        let client = build_http_client()?;
-        Ok(Self {
-            routes: Vec::new(),
-            client,
-        })
+        Ok(Self { routes: Vec::new() })
     }
 
     pub fn from_config(config: &RouterConfig) -> Result<Self, RouterError> {
@@ -84,8 +86,11 @@ impl Router {
             return Ok(mock::mock_response(route, &normalized_source));
         }
 
+        // Build the client at request time so the router sees a DPU MITM CA
+        // that was synced into the live sandbox after the supervisor started.
+        let client = build_http_client()?;
         backend::proxy_to_backend(
-            &self.client,
+            &client,
             route,
             &normalized_source,
             method,
@@ -129,8 +134,11 @@ impl Router {
             return Ok(StreamingProxyResponse::from_buffered(buffered));
         }
 
+        // Build the client at request time so the router sees a DPU MITM CA
+        // that was synced into the live sandbox after the supervisor started.
+        let client = build_http_client()?;
         backend::proxy_to_backend_streaming(
-            &self.client,
+            &client,
             route,
             &normalized_source,
             method,
@@ -158,9 +166,69 @@ fn build_http_client() -> Result<reqwest::Client, RouterError> {
         builder = builder.proxy(proxy);
     }
 
+    for cert in load_custom_root_certificates() {
+        builder = builder.add_root_certificate(cert);
+    }
+
     builder
         .build()
         .map_err(|e| RouterError::Internal(format!("failed to build HTTP client: {e}")))
+}
+
+fn load_custom_root_certificates() -> Vec<reqwest::Certificate> {
+    load_root_certificates_from_paths(&custom_root_certificate_paths())
+}
+
+fn custom_root_certificate_paths() -> Vec<PathBuf> {
+    CUSTOM_ROOT_CA_PATHS.iter().map(PathBuf::from).collect()
+}
+
+fn load_root_certificates_from_paths(paths: &[PathBuf]) -> Vec<reqwest::Certificate> {
+    let mut certificates = Vec::new();
+
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+
+        let Some(parsed) = parse_pem_certificates(path) else {
+            continue;
+        };
+        certificates.extend(parsed);
+    }
+
+    certificates
+}
+
+fn parse_pem_certificates(path: &Path) -> Option<Vec<reqwest::Certificate>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "failed to open custom root CA file");
+            return None;
+        }
+    };
+
+    let mut reader = BufReader::new(file);
+    let certs = match rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>() {
+        Ok(certs) => certs,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "failed to parse PEM certificates from custom root CA file");
+            return None;
+        }
+    };
+
+    let mut parsed = Vec::with_capacity(certs.len());
+    for cert in certs {
+        match reqwest::Certificate::from_der(cert.as_ref()) {
+            Ok(cert) => parsed.push(cert),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "failed to load custom root certificate");
+            }
+        }
+    }
+
+    Some(parsed)
 }
 
 fn upstream_https_proxy_url_from_env() -> Result<Option<String>, RouterError> {
@@ -203,6 +271,8 @@ fn normalize_upstream_proxy_url(raw: &str) -> Result<Option<String>, RouterError
 mod tests {
     use super::*;
     use config::{RouteConfig, RouterConfig};
+    use rcgen::generate_simple_self_signed;
+    use std::fs;
 
     fn test_config() -> RouterConfig {
         RouterConfig {
@@ -263,5 +333,23 @@ mod tests {
         let err = normalize_upstream_proxy_url("socks5://proxy.example:1080").unwrap_err();
         assert!(matches!(err, RouterError::Internal(_)));
         assert!(err.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn load_root_certificates_from_pem_file() {
+        let cert = generate_simple_self_signed(vec!["router-test.local".to_string()])
+            .expect("self-signed cert");
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let pem_path = tempdir.path().join("custom-ca.pem");
+        fs::write(&pem_path, cert.cert.pem()).expect("write pem");
+
+        let certs = load_root_certificates_from_paths(&[pem_path]);
+        assert_eq!(certs.len(), 1);
+    }
+
+    #[test]
+    fn load_root_certificates_ignores_missing_files() {
+        let certs = load_root_certificates_from_paths(&[PathBuf::from("/nonexistent/ca.pem")]);
+        assert!(certs.is_empty());
     }
 }

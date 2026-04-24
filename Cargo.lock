@@ -2939,7 +2939,9 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "openshell-core",
+ "rcgen",
  "reqwest",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "serde_yml",

@@ -14,6 +14,7 @@ repository.workspace = true
 openshell-core = { path = "../openshell-core" }
 bytes = { workspace = true }
 reqwest = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -23,6 +24,7 @@ serde_yml = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+rcgen = { workspace = true }
 wiremock = "0.6"
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
