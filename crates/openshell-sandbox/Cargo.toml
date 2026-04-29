@@ -22,6 +22,10 @@ path = "src/dpu_proxy.rs"
 name = "openshell-dpu-agent"
 path = "src/dpu_agent.rs"
 
+[[bin]]
+name = "openshell-dpu-control"
+path = "src/dpu_control.rs"
+
 [dependencies]
 openshell-core = { path = "../openshell-core" }
 openshell-ocsf = { path = "../openshell-ocsf" }
